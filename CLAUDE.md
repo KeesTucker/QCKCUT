@@ -19,7 +19,7 @@ Package manager is **pnpm** (pinned in `packageManager`).
 ```bash
 pnpm install
 pnpm dev              # Vite on http://localhost:5173
-pnpm test             # the gate: 107 Playwright tests in real Chrome
+pnpm test             # the gate: 123 Playwright tests in real Chrome
 pnpm build            # production bundle into dist/
 pnpm preview          # serve that bundle
 pnpm test:report      # open the HTML report
@@ -102,6 +102,30 @@ lands, which will add only a `start` field for its position on the timeline.
 
 `sourceOf(clip)` and `clipsFor(sourceId)` are the only ways to cross the
 reference. Never denormalise source data onto a clip.
+
+### A source is video or audio
+
+```js
+{ id, name, blob, kind: 'video' | 'audio', duration, width, height, codec }
+```
+
+Audio-only sources are first class: they clip, they go on the sequence, they
+export. What they do not have is pictures, so an audio source has **no
+`entry.track` and no `entry.sink`**, and `width`/`height` are 0. Anything that
+draws must check `media.isVideo(source)` first.
+
+Consequences worth knowing:
+
+- Its filmstrip is a waveform, not tiles. `buildStrip()` branches on kind.
+- Its preview is a black placeholder with the file name.
+- Playback has no frames to pace, so the playhead follows the clock directly.
+- On the sequence it renders as black for its full duration. Skipping it would
+  shorten the sequence and desync the audio mix.
+- `sequenceShape()` finds the first item that *has* pictures, falling back to
+  1280x720 for a sequence of nothing but sound.
+
+`kind` is part of the stored record. It was not at first, and every restored
+source came back looking like audio, so no filmstrip ever built.
 
 ### The sequence stores order, not times
 
@@ -265,7 +289,11 @@ Two distinct paths, and they are not interchangeable:
   Waiting only on the active source is what let the shared-AbortController bug
   through.
 - Test clips are encoded in the browser by the `setup` project into
-  `test/media/` (gitignored). No ffmpeg, no binaries in the repo.
+  `test/media/` (gitignored). No ffmpeg, no binaries in the repo. `bed.wav` is
+  written by hand as PCM, so it needs no encoder extension.
+- `app.stripReady()` waits on each source's `ready` flag, which is kind-aware:
+  tiles decoded for video, peaks present for audio. Counting tiles would never
+  succeed for a waveform.
 - **Fixtures use `keyFrameInterval: 2`.** An all-keyframe clip makes every
   seeking test pass for the wrong reason.
 - `window.*` test hooks are assigned at the bottom of `app.js`. Add to that
@@ -324,26 +352,39 @@ come from different sources with different codecs, resolutions and rotations.
 Every frame is drawn into one output-sized canvas. Output takes the **first
 item's** dimensions; anything shaped differently is letterboxed.
 
+## Marking a clip
+
+`C` is a two-press flow: the first press drops an in point, the second closes
+the clip, `Esc` cancels and puts the range back. Between the two the selection
+follows the playhead, so you see the clip you are about to make.
+
+`applyMark()` runs on **every seek of a drag**, so it deliberately calls
+`updateRange()` / `updateMark()` / `drawStrip()` rather than `updateUI()`.
+Rebuilding the side panels at scrub rate makes dragging crawl.
+
+A mark belongs to the source it was started on, so `setActive()` clears it.
+
+`I` and `O` still set the range by hand, and `addClip()` still makes a clip from
+whatever the range currently is; `markClip()` is the shortcut layered on top.
+
 ## Sound
 
 Playback plays the source's audio; dragging the filmstrip plays a short grain at
 the playhead, rate-limited to one per 90ms so a fast drag is feedback rather
 than a stutter. Grains are latest-wins.
 
-The music bed is one audio file per project, dropped anywhere on the page. It
-plays under the *sequence* only, never the source preview: the preview is for
-finding a moment in one clip, and music there would only be in the way. Export
-mixes it in at its gain, trimmed to the sequence length.
+The music bed is one audio file per project, set by dropping a file *or an
+existing source* onto its waveform lane. Dropping audio anywhere else makes it a
+source, since audio is now clippable in its own right. The bed plays under the
+*sequence* only, never the source preview: the preview is for finding a moment
+in one clip, and music there would only be in the way. Export mixes it in at its
+gain, trimmed to the sequence length.
 
 The bed's decoded `AudioBuffer` and its peaks cannot be stored, so both are
 rebuilt from the blob on load. Peaks are computed once at `screen.width`
 resolution and re-sampled when drawn, so resizing never re-scans the buffer.
 They are normalised against the loudest peak, or a quiet track draws as a flat
 line and tells you nothing.
-
-An audio-only file becomes the bed rather than a source. The extension is only a
-hint though: an `.mp4` can hold sound and nothing else, so a source that turns
-out to have no video track falls back to being the bed instead of failing.
 
 **Tests need `--autoplay-policy=no-user-gesture-required`** (set in
 `playwright.config.mjs`). Chrome keeps an AudioContext suspended until a real
@@ -352,5 +393,10 @@ every sound path is silently untestable.
 
 ## Not built yet
 
-Transitions, social export presets, and ducking the music under speech. The
-sequence is also single-track: items cannot overlap.
+Playback speed multipliers. Video would be easy (the clock is already an
+abstraction, so a rate is a division), and audio is easy too via
+`AudioBufferSourceNode.playbackRate`, but that shifts pitch. Pitch-preserving
+time-stretch needs a phase vocoder, which Web Audio does not provide.
+
+Also: transitions, social export presets, and ducking music under speech. The
+sequence is single-track, so items cannot overlap.

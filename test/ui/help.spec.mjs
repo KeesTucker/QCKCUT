@@ -40,9 +40,13 @@ test('shortcuts do not fire while help is open', async ({ app }) => {
   await app.page.locator('#helpBtn').click();
 
   await app.page.keyboard.press('c');
-  expect((await app.state()).clips).toHaveLength(0);
+  expect((await app.state()).marking, 'C must not arm a mark behind the help').toBeNull();
 
   await app.page.keyboard.press('Escape');
+  // C is a two-press flow: arm, then close.
+  await app.page.evaluate(() => window.seek(1));
+  await app.page.keyboard.press('c');
+  await app.page.evaluate(() => window.seek(2));
   await app.page.keyboard.press('c');
   await expect.poll(async () => (await app.state()).clips.length).toBe(1);
 });

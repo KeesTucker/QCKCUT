@@ -1,5 +1,9 @@
 // Open media and the decoders behind it.
 //
+// A source is either video (with or without sound) or audio-only. Audio-only
+// sources have no `track` and no video `sink`, so anything that draws pictures
+// must check `isVideo(source)` first.
+//
 // Every Input holds a hardware decoder, and the pool is finite: opening one per
 // source and never closing them fails opaquely with "Decoding error" after a
 // handful of imports. So sources are opened lazily, kept warm while in use, and
@@ -22,15 +26,28 @@ export async function acquire(source) {
   if (!entry) {
     const input = new Input({ source: new BlobSource(source.blob), formats: ALL_FORMATS });
     const track = await input.getPrimaryVideoTrack();
-    if (!track) {
+    const sound = await input.getPrimaryAudioTrack();
+
+    if (!track && !sound) {
       input.dispose();
-      throw new Error(`${source.name}: no video track`);
+      throw new Error(`${source.name}: no video or audio track`);
     }
-    if (!(await track.canDecode())) {
+    if (track && !(await track.canDecode())) {
       input.dispose();
       throw new Error(`${source.name}: cannot decode ${track.codec ?? 'this codec'}`);
     }
-    entry = { input, track, sink: new VideoSampleSink(track), uses: 0, touched: 0 };
+    if (!track && !(await sound.canDecode())) {
+      input.dispose();
+      throw new Error(`${source.name}: cannot decode ${sound.codec ?? 'this codec'}`);
+    }
+
+    entry = {
+      input,
+      track,
+      sink: track ? new VideoSampleSink(track) : null,
+      uses: 0,
+      touched: 0,
+    };
     open.set(source.id, entry);
   }
   entry.uses++;
@@ -99,14 +116,25 @@ export async function audioOf(entry) {
 
 // ─── Reading a source ────────────────────────────────────────────────────────
 
+/** True for a source that has pictures to show. */
+export const isVideo = (source) => source?.kind === 'video';
+
 /** Metadata for a newly imported file. Does not keep the decoder open. */
 export async function probe(source) {
-  return using(source, async ({ input, track }) => ({
-    duration: await input.computeDuration(),
-    width: await track.getDisplayWidth(),
-    height: await track.getDisplayHeight(),
-    codec: track.codec,
-  }));
+  return using(source, async (entry) => {
+    const duration = await entry.input.computeDuration();
+    if (!entry.track) {
+      const sound = await audioOf(entry);
+      return { kind: 'audio', duration, width: 0, height: 0, codec: sound?.track.codec ?? null };
+    }
+    return {
+      kind: 'video',
+      duration,
+      width: await entry.track.getDisplayWidth(),
+      height: await entry.track.getDisplayHeight(),
+      codec: entry.track.codec,
+    };
+  });
 }
 
 /** Thumbnail tile width for a source, at THUMB_H tall. */

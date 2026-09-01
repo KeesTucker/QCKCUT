@@ -40,8 +40,8 @@ async function run(store, mode, action) {
 
 // Only the durable fields go to disk. Decoded thumbnails and open decoders are
 // rebuilt on load; neither is structured-cloneable anyway.
-const sourceRecord = ({ id, name, blob, duration, width, height, codec }) =>
-  ({ id, name, blob, duration, width, height, codec });
+const sourceRecord = ({ id, name, blob, kind, duration, width, height, codec }) =>
+  ({ id, name, blob, kind, duration, width, height, codec });
 
 export const putSource = (source) => run('sources', 'readwrite', (s) => s.put(sourceRecord(source)));
 export const dropSource = (id) => run('sources', 'readwrite', (s) => s.delete(id));

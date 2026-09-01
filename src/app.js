@@ -21,6 +21,7 @@ const S = {
   activeItemId: null,
   seqPlayhead: 0,
   playingSeq: false,
+  marking: null,    // { at, wasIn, wasOut } while a clip is being marked
   playhead: 0,
   in: 0,
   out: 0,
@@ -54,6 +55,7 @@ const selection = $('selection');
 const handleIn = $('handleIn');
 const handleOut = $('handleOut');
 const playheadEl = $('playheadEl');
+const markEl = $('markEl');
 const playBtn = $('playBtn');
 const exportBtn = $('exportBtn');
 const markInBtn = $('markIn');
@@ -130,6 +132,18 @@ function paint(sample) {
   sample.drawWithFit(pctx, { fit: 'contain' });
 }
 
+/** What the preview shows for a source, or a sequence item, with no pictures. */
+function paintSilence(label) {
+  pctx.fillStyle = '#000';
+  pctx.fillRect(0, 0, preview.width, preview.height);
+  if (!label) return;
+  pctx.fillStyle = '#5c6270';
+  pctx.font = `${Math.round(preview.height / 16)}px ui-monospace, Menlo, monospace`;
+  pctx.textAlign = 'center';
+  pctx.textBaseline = 'middle';
+  pctx.fillText(label, preview.width / 2, preview.height / 2);
+}
+
 // ─── Scrubbing ───────────────────────────────────────────────────────────────
 // Coalesced: at most one decode in flight, and only the newest requested time
 // survives. Without this a fast drag queues hundreds of decodes and the preview
@@ -143,6 +157,11 @@ export async function seek(time) {
   if (!source || !held || !Number.isFinite(time)) return;
   S.playhead = clamp(time, 0, source.duration);
   updateTransport();
+  if (S.marking) applyMark();
+  if (!held.sink) {
+    paintSilence(source.name);   // audio-only: there is no frame to fetch
+    return;
+  }
   pendingSeek = S.playhead;
   if (seeking) return;
 
@@ -193,6 +212,27 @@ export async function play() {
     elapsed = audio.audioClock(startAt);
     audio.schedule({ sink: sound.sink, from, to: S.out, startAt, signal: stopping.signal })
       .catch(fail);
+  }
+
+  if (!held.sink) {
+    // Audio only: there are no frames to pace, so the playhead follows the
+    // clock directly until the range ends or playback is stopped.
+    try {
+      paintSilence(active()?.name);
+      while (S.playing) {
+        const at = from + elapsed();
+        S.playhead = Math.min(at, S.out);
+        updateTransport();
+        if (at >= S.out) break;
+        await sleep(40);
+      }
+    } finally {
+      stopping.abort();
+      if (playRun === stopping) playRun = null;
+      if (S.playing) { S.playhead = S.out; updateTransport(); }
+      pause();
+    }
+    return;
   }
 
   let painted = false;
@@ -260,24 +300,49 @@ export async function buildStrip(source) {
   const run = new AbortController();
   stripRuns.set(source.id, run);
 
+  try {
+    if (media.isVideo(source)) await buildTiles(source, run.signal);
+    else await buildWaveform(source, run.signal);
+  } finally {
+    if (stripRuns.get(source.id) === run) stripRuns.delete(source.id);
+  }
+}
+
+async function buildTiles(source, signal) {
   source.thumbCount = Math.max(1, Math.ceil((window.screen?.width ?? 1920) / media.tileWidth(source)));
   source.thumbs = [];
   if (source.id === S.activeId) drawStrip();
 
-  try {
-    for await (const tile of media.tiles(source, source.thumbCount, run.signal)) {
-      if (run.signal.aborted) return;
-      source.thumbs.push(tile);
-      if (!source.poster && tile) {
-        source.poster = tile;
-        source.posterUrl = tile.toDataURL();
-      }
-      if (source.id === S.activeId) drawStrip();
-      if (source.thumbs.length === 1) { renderSources(); renderTrack(); }
+  for await (const tile of media.tiles(source, source.thumbCount, signal)) {
+    if (signal.aborted) return;
+    source.thumbs.push(tile);
+    if (!source.poster && tile) {
+      source.poster = tile;
+      source.posterUrl = tile.toDataURL();
     }
-  } finally {
-    if (stripRuns.get(source.id) === run) stripRuns.delete(source.id);
+    if (source.id === S.activeId) drawStrip();
+    if (source.thumbs.length === 1) { renderSources(); renderTrack(); }
   }
+}
+
+// An audio source has no pictures, so its filmstrip is its waveform. Peaks are
+// read straight from the decoder rather than by holding the whole file as one
+// AudioBuffer.
+async function buildWaveform(source, signal) {
+  source.thumbCount = 1;   // "built" for the purposes of the strip being ready
+  source.thumbs = [];
+  await media.using(source, async (entry) => {
+    const sound = await media.audioOf(entry);
+    if (!sound) return;
+    const count = Math.ceil(window.screen?.width ?? 1920);
+    source.peaks = await audio.peaksFromSink(sound.sink, source.duration, count, signal);
+    source.loudest = audio.loudest(source.peaks);
+  });
+  if (signal.aborted) return;
+  source.thumbs = [null];
+  if (source.id === S.activeId) drawStrip();
+  renderSources();
+  renderTrack();
 }
 
 /** True when no filmstrip is still decoding. For tests. */
@@ -295,16 +360,34 @@ export function drawStrip() {
   sctx.fillRect(0, 0, cssW, media.THUMB_H);
   if (!source?.thumbCount) return;
 
-  const colW = cssW / source.thumbCount;
-  for (let i = 0; i < source.thumbs.length; i++) {
-    const tile = source.thumbs[i];
-    if (!tile) continue;
-    // Centre-crop into the column so a narrow window never squashes the frame.
-    const sw = Math.min(tile.width, (colW / media.THUMB_H) * tile.height);
-    sctx.drawImage(tile, (tile.width - sw) / 2, 0, sw, tile.height,
-      i * colW, 0, colW + 0.5, media.THUMB_H);
+  if (media.isVideo(source)) {
+    const colW = cssW / source.thumbCount;
+    for (let i = 0; i < source.thumbs.length; i++) {
+      const tile = source.thumbs[i];
+      if (!tile) continue;
+      // Centre-crop into the column so a narrow window never squashes the frame.
+      const sw = Math.min(tile.width, (colW / media.THUMB_H) * tile.height);
+      sctx.drawImage(tile, (tile.width - sw) / 2, 0, sw, tile.height,
+        i * colW, 0, colW + 0.5, media.THUMB_H);
+    }
+  } else {
+    drawWaveform(sctx, source, cssW, media.THUMB_H);
   }
   drawClipMarks(cssW, source);
+}
+
+/** The whole of a source's audio, normalised, filling the given box. */
+function drawWaveform(ctx, source, width, height) {
+  if (!source.peaks) return;
+  const middle = height / 2;
+  const room = height - 10;
+  ctx.fillStyle = 'rgba(120, 200, 255, .75)';
+  for (let x = 0; x < Math.floor(width); x++) {
+    const at = Math.floor((x / width) * source.peaks.length);
+    const peak = source.peaks[Math.min(at, source.peaks.length - 1)] / source.loudest;
+    const h = Math.max(1, peak * room);
+    ctx.fillRect(x, middle - h / 2, 1, h);
+  }
 }
 
 // Every clip of this source shows as a band on its own filmstrip, so you can see
@@ -335,6 +418,16 @@ function updateTransport() {
   playheadEl.style.left = `${xForTime(S.playhead)}px`;
 }
 
+/** Header line for a source. Audio has no dimensions worth advertising. */
+const describe = (source) => media.isVideo(source)
+  ? `${source.name} · ${source.width}×${source.height} · ${source.codec ?? '?'}`
+  : `${source.name} · audio · ${source.codec ?? '?'}`;
+
+function updateMark() {
+  timeline.classList.toggle('marking', !!S.marking);
+  if (S.marking) markEl.style.left = `${xForTime(S.marking.at)}px`;
+}
+
 function updateRange() {
   const left = xForTime(S.in);
   const right = xForTime(S.out);
@@ -351,7 +444,9 @@ function renderSources() {
     const { el } = row({
       active: source.id === S.activeId,
       name: source.name,
-      meta: `${timecode(source.duration)} · ${source.width}×${source.height}`,
+      meta: media.isVideo(source)
+        ? `${timecode(source.duration)} · ${source.width}×${source.height}`
+        : `${timecode(source.duration)} · audio`,
       onSelect: () => setActive(source.id).catch(fail),
       onDrop: () => removeSource(source.id).catch(fail),
       drag: { kind: 'source', id: source.id },
@@ -568,14 +663,13 @@ function updateUI() {
   timeline.classList.toggle('empty', !loaded);
   drop.classList.toggle('hidden', S.sources.length > 0);
   for (const b of [playBtn, exportBtn, markInBtn, markOutBtn, addClipBtn]) b.disabled = !loaded;
-  fileNameEl.textContent = loaded
-    ? `${source.name} · ${source.width}×${source.height} · ${source.codec ?? '?'}`
-    : 'no clip';
+  fileNameEl.textContent = loaded ? describe(source) : 'no clip';
   renderSources();
   renderClips();
   renderTrack();
   renderMusic();
   updateRange();
+  updateMark();
   updateTransport();
   drawStrip();
 }
@@ -601,6 +695,7 @@ export async function setActive(id) {
   // open, and let the pool evict whatever falls out of use.
   if (held) media.release(S.activeId);
   held = null;
+  S.marking = null;   // a mark belongs to the source it was started on
   S.activeId = id;
 
   const source = active();
@@ -609,8 +704,14 @@ export async function setActive(id) {
     return;
   }
   held = await media.acquire(source);
-  preview.width = source.width;
-  preview.height = source.height;
+  if (media.isVideo(source)) {
+    preview.width = source.width;
+    preview.height = source.height;
+  } else {
+    // No pictures. A modest canvas is enough for the placeholder.
+    preview.width = 640;
+    preview.height = 360;
+  }
   S.playhead = 0;
   S.in = 0;
   S.out = source.duration;
@@ -647,6 +748,65 @@ export async function removeSource(id) {
 // ─── Clips ────────────────────────────────────────────────────────────────────
 // A clip is only ever a reference. Creating one copies two numbers, so there is
 // nothing to be careful about: adjust, re-adjust or delete freely.
+
+// Marking a clip is two presses of C: the first drops an in point, the second
+// closes the clip. Escape puts the range back the way it was. Between the two
+// the selection follows the playhead, so you see the clip you are about to make
+// rather than having to imagine it.
+
+export function beginMark() {
+  const source = active();
+  if (!source) return null;
+  S.marking = { at: S.playhead, wasIn: S.in, wasOut: S.out };
+  applyMark();
+  return S.marking;
+}
+
+export function cancelMark() {
+  if (!S.marking) return false;
+  S.in = S.marking.wasIn;
+  S.out = S.marking.wasOut;
+  S.marking = null;
+  updateUI();
+  return true;
+}
+
+/** Track the pending selection between the mark and the playhead. */
+function applyMark() {
+  if (!S.marking) return;
+  S.in = Math.min(S.marking.at, S.playhead);
+  S.out = Math.max(S.marking.at, S.playhead);
+  // Deliberately not updateUI(): this runs on every seek of a drag, and
+  // rebuilding the side panels each time would make scrubbing crawl.
+  updateRange();
+  updateMark();
+  drawStrip();
+}
+
+/**
+ * C, the one shortcut that does the whole job: start a mark, or finish it.
+ * Returns the clip when one was made.
+ */
+export async function markClip() {
+  const source = active();
+  if (!source) return null;
+  if (!S.marking) {
+    beginMark();
+    setStatus('marking… press C again to keep it, Esc to cancel');
+    return null;
+  }
+
+  applyMark();
+  const span = S.out - S.in;
+  S.marking = null;
+  if (span < MIN_RANGE) {
+    setStatus('too short to keep');
+    updateUI();
+    return null;
+  }
+  setStatus('');
+  return addClip();
+}
 
 export async function addClip() {
   const source = active();
@@ -705,6 +865,19 @@ const DRAG_TYPE = 'application/x-qckcut';
 // Aborting this stops any sound scheduled for the running sequence.
 let seqRun = null;
 
+// A sequence of nothing but audio still has to be *some* size, so fall back
+// when no item has pictures.
+const DEFAULT_SHAPE = { width: 1280, height: 720 };
+
+/** The output size for a sequence: the first item that has pictures. */
+export function sequenceShape(rows) {
+  for (const row of rows) {
+    const source = sourceById(row.item.sourceId);
+    if (media.isVideo(source)) return { width: source.width, height: source.height };
+  }
+  return DEFAULT_SHAPE;
+}
+
 function renderTrack() {
   const rows = sequenceRows();
   const total = rows.length ? rows[rows.length - 1].end : 0;
@@ -715,7 +888,8 @@ function renderTrack() {
   track.replaceChildren(...rows.map((row) => {
     const source = sourceById(row.item.sourceId);
     const el = document.createElement('li');
-    el.className = `track-item${row.item.id === S.activeItemId ? ' active' : ''}`;
+    const kinds = [media.isVideo(source) ? '' : ' audio', row.item.id === S.activeItemId ? ' active' : ''];
+    el.className = `track-item${kinds.join('')}`;
     el.dataset.id = row.item.id;
     el.dataset.index = String(row.index);
     // Width tracks duration so the track reads as a timeline, with a floor so
@@ -899,11 +1073,9 @@ export async function playSequence() {
 
   // The preview takes the sequence's own dimensions; items shaped differently
   // are letterboxed into it, matching what export produces.
-  const first = sourceById(rows[0].item.sourceId);
-  if (first) {
-    preview.width = first.width;
-    preview.height = first.height;
-  }
+  const shape = sequenceShape(rows);
+  preview.width = shape.width;
+  preview.height = shape.height;
 
   const origin = S.seqPlayhead;
   const stopping = new AbortController();
@@ -943,6 +1115,20 @@ export async function playSequence() {
       }
 
       try {
+        if (!entry.sink) {
+          // Audio item: black picture, and the playhead follows the clock.
+          paintSilence(row.item.label);
+          painted = true;
+          while (S.playingSeq) {
+            const at = origin + elapsed();
+            S.seqPlayhead = Math.min(at, row.end);
+            seqDurationEl.textContent = `${timecode(S.seqPlayhead)} / ${timecode(total)}`;
+            if (at >= row.end) break;
+            await sleep(40);
+          }
+          continue;
+        }
+
         for await (const sample of entry.sink.samples(from, row.item.out)) {
           try {
             if (!S.playingSeq) break;
@@ -991,7 +1177,8 @@ export async function exportSequence() {
     const rows = sequenceRows();
     const started = performance.now();
     const blob = await render.renderSequence(rows, (item) => sourceById(item.sourceId),
-      (p) => setStatus(`rendering sequence ${Math.round(p * 100)}%`), S.music);
+      (p) => setStatus(`rendering sequence ${Math.round(p * 100)}%`), S.music,
+      sequenceShape(rows));
     const took = (performance.now() - started) / 1000;
     render.download(blob, 'sequence.mp4');
     const total = rows[rows.length - 1].end;
@@ -1011,10 +1198,10 @@ seqExportBtn.addEventListener('click', () => exportSequence().catch(fail));
 // preview: the preview is for finding a moment in one clip, and music there
 // would just be in the way.
 
-export async function setMusic(file, gain = 0.35) {
+export async function setMusic(file, gain = 0.35, name = file.name ?? 'music') {
   const buffer = await audio.decode(file);
   S.music = {
-    name: file.name,
+    name,
     blob: file,
     buffer,
     duration: buffer.duration,
@@ -1123,6 +1310,42 @@ function stopMusic() {
 musicGain.addEventListener('input', () => setMusicGain(Number(musicGain.value)).catch(fail));
 musicDrop.addEventListener('click', () => removeMusic().catch(fail));
 
+/** Use an existing source as the bed, without importing the file twice. */
+export async function setMusicFromSource(id) {
+  const source = sourceById(id);
+  if (!source) return null;
+  return setMusic(source.blob, S.music?.gain ?? 0.35, source.name);
+}
+
+for (const type of ['dragenter', 'dragover']) {
+  musicTrack.addEventListener(type, (event) => {
+    const types = event.dataTransfer?.types ?? [];
+    if (!types.includes(DRAG_TYPE) && !types.includes('Files')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    musicTrack.classList.add('over');
+  });
+}
+
+musicTrack.addEventListener('dragleave', () => musicTrack.classList.remove('over'));
+
+musicTrack.addEventListener('drop', (event) => {
+  const types = event.dataTransfer?.types ?? [];
+  const ours = types.includes(DRAG_TYPE);
+  if (!ours && !types.includes('Files')) return;
+  event.preventDefault();
+  event.stopPropagation();
+  musicTrack.classList.remove('over');
+
+  if (ours) {
+    const payload = dropPayload(event);
+    if (payload?.kind === 'source') setMusicFromSource(payload.id).catch(fail);
+    return;
+  }
+  const file = [...(event.dataTransfer.files ?? [])][0];
+  if (file) setMusic(file).catch(fail);
+});
+
 // ─── Sound toggle ────────────────────────────────────────────────────────────
 
 export function setMuted(muted) {
@@ -1227,14 +1450,17 @@ markOutBtn.addEventListener('click', () => {
   syncActiveClip().catch(fail);
 });
 
-addClipBtn.addEventListener('click', () => addClip().catch(fail));
+addClipBtn.addEventListener('click', () => markClip().catch(fail));
 addSourceBtn.addEventListener('click', () => pickFiles());
 
 document.addEventListener('keydown', (event) => {
   if (event.target.tagName === 'INPUT') return;
   if (event.key === '?') { event.preventDefault(); return openHelp(); }
   if (event.key === 'm') return setMuted(!S.muted);
-  if (event.key === 'Escape' && helpOpen()) return closeHelp();
+  if (event.key === 'Escape') {
+    if (helpOpen()) return closeHelp();
+    if (cancelMark()) return setStatus('');
+  }
   if (!held || helpOpen()) return;
   const frame = 1 / 30;
   if (event.code === 'Space') { event.preventDefault(); S.playing ? pause() : play().catch(fail); }
@@ -1242,7 +1468,7 @@ document.addEventListener('keydown', (event) => {
   else if (event.code === 'ArrowRight') { pause(); seek(S.playhead + (event.shiftKey ? 1 : frame)).catch(fail); }
   else if (event.key === 'i') markInBtn.click();
   else if (event.key === 'o') markOutBtn.click();
-  else if (event.key === 'c') addClip().catch(fail);
+  else if (event.key === 'c') markClip().catch(fail);
   else if (event.key === 't') appendRange().catch(fail);
 });
 
@@ -1318,19 +1544,10 @@ const isAudio = (file) =>
   file.type.startsWith('audio/') || /\.(mp3|m4a|aac|wav|flac|ogg|opus)$/i.test(file.name);
 
 async function addFiles(files) {
+  // Audio is a source like any other: it can be clipped and put on the
+  // sequence. The music bed is set by dropping onto its own lane instead.
   for (const file of files) {
-    // An audio-only file is a music bed, not a source: it has no picture to
-    // cut. The extension is only a hint though, since an .mp4 or .m4a can hold
-    // sound and nothing else, so a source that turns out to have no video
-    // falls back to being the bed rather than failing.
-    if (isVideo(file)) {
-      await addSource(file).catch((error) => {
-        if (/no video track/i.test(error?.message ?? '')) return setMusic(file).catch(fail);
-        return fail(error);
-      });
-    } else if (isAudio(file)) {
-      await setMusic(file).catch(fail);
-    }
+    if (isVideo(file) || isAudio(file)) await addSource(file).catch(fail);
   }
 }
 
@@ -1372,6 +1589,7 @@ window.addEventListener('resize', () => {
   drawStrip();
   renderMusic();
   updateRange();
+  updateMark();
   updateTransport();
   // Only devicePixelRatio can change what needs decoding (dragging to a
   // different-density display), and that is rare enough to settle for.
@@ -1396,7 +1614,17 @@ export async function restore() {
     return;
   }
   const known = (id) => sources.some((s) => s.id === id);
-  S.sources = sources.map((s) => ({ ...s, thumbs: [], thumbCount: 0, poster: null, posterUrl: null }));
+  S.sources = sources.map((s) => ({
+    ...s,
+    // Older records predate `kind`; anything with dimensions had pictures.
+    kind: s.kind ?? (s.width > 0 ? 'video' : 'audio'),
+    thumbs: [],
+    thumbCount: 0,
+    poster: null,
+    posterUrl: null,
+    peaks: null,
+    loudest: 1,
+  }));
   S.clips = clips.filter((c) => known(c.sourceId));
   S.timeline = timeline.filter((i) => known(i.sourceId));
   // Ids are minted from a counter, so continue past whatever was restored.
@@ -1410,7 +1638,21 @@ export async function restore() {
 export function snapshot() {
   const source = active();
   return {
-    sources: S.sources.map((s) => ({ id: s.id, name: s.name, duration: s.duration, width: s.width, height: s.height, thumbCount: s.thumbCount, thumbsDecoded: s.thumbs.filter(Boolean).length })),
+    sources: S.sources.map((s) => ({
+      id: s.id,
+      name: s.name,
+      kind: s.kind,
+      duration: s.duration,
+      width: s.width,
+      height: s.height,
+      thumbCount: s.thumbCount,
+      thumbsDecoded: s.thumbs.filter(Boolean).length,
+      // A video source is ready when every tile is decoded; an audio one when
+      // its peaks are in. "Tiles decoded" means nothing for a waveform.
+      ready: media.isVideo(s)
+        ? s.thumbCount > 0 && s.thumbs.filter(Boolean).length === s.thumbCount
+        : !!s.peaks,
+    })),
     clips: S.clips.map((c) => ({ ...c })),
     timeline: sequenceRows().map(({ item, index, start, duration, end }) =>
       ({ ...item, index, start, duration, end })),
@@ -1421,6 +1663,8 @@ export function snapshot() {
     seqPlayhead: S.seqPlayhead,
     playingSeq: S.playingSeq,
     muted: S.muted,
+    marking: S.marking ? { at: S.marking.at } : null,
+    kind: source?.kind ?? null,
     music: S.music
       ? { name: S.music.name, gain: S.music.gain, duration: S.music.duration }
       : null,
@@ -1442,10 +1686,10 @@ updateUI();
 Object.assign(window, {
   S, media, store, snapshot, restore,
   seek, play, pause, addSource, setActive, removeSource,
-  addClip, selectClip, removeClip, exportRange, buildStrip, queueStrip, drawStrip, stripsIdle,
+  addClip, markClip, beginMark, cancelMark, selectClip, removeClip, exportRange, buildStrip, queueStrip, drawStrip, stripsIdle,
   sequence, render, addToSequence, removeFromSequence, moveInSequence, selectItem,
-  appendRange, playSequence, stopSequence, exportSequence,
-  audio, setMusic, removeMusic, setMusicGain, setMuted,
+  appendRange, playSequence, stopSequence, exportSequence, sequenceShape,
+  audio, setMusic, setMusicFromSource, removeMusic, setMusicGain, setMuted,
   timecode, parseTimecode, clamp, clipLabel, exportName, setClipRange,
 });
 

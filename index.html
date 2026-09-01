@@ -63,6 +63,7 @@
   <div id="selection" class="selection"></div>
   <div id="handleIn" class="handle handle-in"></div>
   <div id="handleOut" class="handle handle-out"></div>
+  <div id="markEl" class="mark"></div>
   <div id="playheadEl" class="playhead"></div>
 </section>
 
@@ -96,19 +97,23 @@
 
       <section>
         <h4>Sources</h4>
-        <p>Drop video files anywhere on the page, or press <kbd>+</kbd> in the Sources panel.
+        <p>Drop video <em>or audio</em> files anywhere on the page, or press <kbd>+</kbd> in the
+        Sources panel. Audio is a source like any other: it gets a waveform instead of a
+        filmstrip, and it can be clipped and put on the sequence, where it plays over black.
         Everything stays on your machine: nothing is uploaded, and the project is saved in
         this browser so it is still here when you come back.</p>
       </section>
 
       <section>
         <h4>Clips</h4>
-        <p>Scrub the filmstrip to find a moment, set the range with <kbd>I</kbd> and <kbd>O</kbd>,
-        then press <kbd>C</kbd> to keep it as a clip. A clip is only a reference to a start and
-        end time in its source, so making one costs nothing and deletes nothing. Click a clip to
-        select it and type exact times into the boxes that appear, or drag the handles on the
-        filmstrip. Every clip on the current source shows as a band along the bottom of the
-        filmstrip.</p>
+        <p>Scrub to the start of a moment and press <kbd>C</kbd>. Scrub to the end and press
+        <kbd>C</kbd> again to keep it as a clip; <kbd>Esc</kbd> cancels. The selection follows
+        the playhead while you are marking, so you see the clip you are about to make.
+        <kbd>I</kbd> and <kbd>O</kbd> are still there for adjusting a range by hand.</p>
+        <p>A clip is only a reference to a start and end time in its source, so making one costs
+        nothing and deletes nothing. Click a clip to select it and type exact times into the
+        boxes that appear, or drag the handles on the filmstrip. Every clip on the current source
+        shows as a band along the bottom of the filmstrip.</p>
       </section>
 
       <section>
@@ -125,9 +130,10 @@
         <h4>Sound</h4>
         <p>The preview plays audio, and dragging the filmstrip plays a short
         grain at the playhead so you can hear where you are. <kbd>M</kbd> mutes
-        it. Drop an audio file onto the page to use it as a music bed: it plays
+        it. The music bed plays
         under the sequence and is mixed into the exported file at whatever level
-        you set, trimmed to the sequence length.</p>
+        you set, trimmed to the sequence length. Drop a file, or drag a source, onto the
+        waveform lane under the sequence to set it.</p>
       </section>
 
       <section>
@@ -145,11 +151,11 @@
           <tr><td><kbd>Shift</kbd> <kbd>&larr;</kbd> <kbd>&rarr;</kbd></td><td>Jump one second</td></tr>
           <tr><td><kbd>I</kbd></td><td>Mark in at the playhead</td></tr>
           <tr><td><kbd>O</kbd></td><td>Mark out at the playhead</td></tr>
-          <tr><td><kbd>C</kbd></td><td>Make a clip from the current range</td></tr>
+          <tr><td><kbd>C</kbd></td><td>Mark the start of a clip, then its end</td></tr>
           <tr><td><kbd>T</kbd></td><td>Append the current range to the sequence</td></tr>
           <tr><td><kbd>M</kbd></td><td>Mute or unmute the preview</td></tr>
           <tr><td><kbd>?</kbd></td><td>Open this help</td></tr>
-          <tr><td><kbd>Esc</kbd></td><td>Close this help</td></tr>
+          <tr><td><kbd>Esc</kbd></td><td>Cancel a mark, or close this help</td></tr>
         </table>
       </section>
 

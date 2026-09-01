@@ -15,13 +15,81 @@ test('a clip is a reference to the source, not a copy', async ({ app }) => {
   await expect(app.rows('clipList')).toHaveCount(1);
 });
 
-test('pressing C clips from the current in and out', async ({ app }) => {
+test('two presses of C mark a clip', async ({ app }) => {
   await app.add('land');
-  await app.page.evaluate(() => { window.S.in = 1; window.S.out = 2; });
-  await app.page.locator('#timeline').click({ position: { x: 5, y: 5 } });
-  await app.page.evaluate(() => { window.S.in = 1; window.S.out = 2; });
+  await app.page.evaluate(() => window.seek(1));
   await app.page.keyboard.press('c');
+
+  // The first press only arms it; nothing is kept yet.
+  await expect(app.rows('clipList')).toHaveCount(0);
+  expect((await app.state()).marking.at).toBeCloseTo(1, 2);
+
+  await app.page.evaluate(() => window.seek(3));
+  await app.page.keyboard.press('c');
+
   await expect(app.rows('clipList')).toHaveCount(1);
+  const s = await app.state();
+  expect(s.marking).toBeNull();
+  expect(s.clips[0].in).toBeCloseTo(1, 1);
+  expect(s.clips[0].out).toBeCloseTo(3, 1);
+});
+
+test('the selection follows the playhead while marking', async ({ app }) => {
+  await app.add('land');
+  await app.page.evaluate(() => window.seek(2));
+  await app.page.keyboard.press('c');
+
+  await app.page.evaluate(() => window.seek(4));
+  let s = await app.state();
+  expect(s.in).toBeCloseTo(2, 1);
+  expect(s.out).toBeCloseTo(4, 1);
+
+  // Marking backwards works too: the range is the span, not the order.
+  await app.page.evaluate(() => window.seek(0.5));
+  s = await app.state();
+  expect(s.in).toBeCloseTo(0.5, 1);
+  expect(s.out).toBeCloseTo(2, 1);
+});
+
+test('Esc cancels a mark and restores the range', async ({ app }) => {
+  await app.add('land');
+  await app.page.evaluate(() => { window.S.in = 1; window.S.out = 5; return window.seek(2); });
+  await app.page.keyboard.press('c');
+  await app.page.evaluate(() => window.seek(3));
+  expect((await app.state()).out).toBeCloseTo(3, 1);
+
+  await app.page.keyboard.press('Escape');
+
+  const s = await app.state();
+  expect(s.marking).toBeNull();
+  expect(s.in).toBeCloseTo(1, 1);
+  expect(s.out).toBeCloseTo(5, 1);
+  await expect(app.rows('clipList')).toHaveCount(0);
+});
+
+test('a mark shorter than the minimum is dropped, not kept', async ({ app }) => {
+  await app.add('land');
+  await app.page.evaluate(() => window.seek(2));
+  await app.page.keyboard.press('c');
+  await app.page.keyboard.press('c');   // same spot: zero length
+
+  await expect(app.rows('clipList')).toHaveCount(0);
+  expect((await app.state()).marking).toBeNull();
+});
+
+test('switching source abandons a mark', async ({ app }) => {
+  await app.add('land', 'hd');
+  const land = (await app.state()).sources.find((x) => x.name === 'land.mp4').id;
+  await app.page.evaluate((id) => window.setActive(id), land);
+  await app.page.evaluate(() => window.seek(1));
+  await app.page.keyboard.press('c');
+  expect((await app.state()).marking).not.toBeNull();
+
+  const hd = (await app.state()).sources.find((x) => x.name === 'hd.mp4').id;
+  await app.page.evaluate((id) => window.setActive(id), hd);
+
+  // A mark belongs to the source it was started on.
+  expect((await app.state()).marking).toBeNull();
 });
 
 test('clips accumulate and are labelled per source', async ({ app }) => {

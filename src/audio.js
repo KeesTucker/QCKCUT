@@ -134,3 +134,30 @@ export function peaks(buffer, count) {
   }
   return out;
 }
+
+/**
+ * Peaks for a whole track, read straight from the decoder rather than by
+ * decoding the file into one AudioBuffer. A long song held whole is tens of
+ * megabytes; this streams it and keeps only the peaks.
+ */
+export async function peaksFromSink(sink, duration, count, signal) {
+  const out = new Float32Array(count);
+  if (duration <= 0) return out;
+  const perSecond = count / duration;
+
+  for await (const { buffer, timestamp } of sink.buffers()) {
+    if (signal?.aborted) return out;
+    const data = buffer.getChannelData(0);
+    const rate = buffer.sampleRate;
+    for (let i = 0; i < data.length; i++) {
+      const bucket = Math.floor((timestamp + i / rate) * perSecond);
+      if (bucket < 0 || bucket >= count) continue;
+      const value = data[i] < 0 ? -data[i] : data[i];
+      if (value > out[bucket]) out[bucket] = value;
+    }
+  }
+  return out;
+}
+
+/** The largest value in a peaks array, never zero so it is safe to divide by. */
+export const loudest = (peaks) => peaks.reduce((a, b) => (b > a ? b : a), 0) || 1;

@@ -23,7 +23,7 @@ async function build(app, ...specs) {
   }
 }
 
-test('dropping an audio file makes it the music bed, not a source', async ({ app }) => {
+test('dropping an audio file on the page makes it a source, not the bed', async ({ app }) => {
   await app.page.evaluate(async () => {
     const blob = await (await fetch('/test/media/bed.wav')).blob();
     const dt = new DataTransfer();
@@ -32,10 +32,44 @@ test('dropping an audio file makes it the music bed, not a source', async ({ app
       new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
   });
 
-  await expect.poll(async () => (await app.state()).music?.name).toBe('bed.wav');
+  await expect.poll(async () => (await app.state()).sources.length).toBe(1);
   const s = await app.state();
-  expect(s.sources, 'audio must not become a source').toHaveLength(0);
-  expect(s.music.duration).toBeCloseTo(8, 0);
+  expect(s.sources[0].kind).toBe('audio');
+  expect(s.music, 'the bed is set on its own lane, not by dropping on the page').toBeNull();
+});
+
+test('dropping a file on the music lane sets the bed', async ({ app }) => {
+  // The lane is only shown once a bed exists, so seed one, then replace it.
+  await addMusic(app);
+  await app.page.evaluate(async () => {
+    const blob = await (await fetch('/test/media/bed.wav')).blob();
+    const dt = new DataTransfer();
+    dt.items.add(new File([blob], 'other.wav', { type: 'audio/wav' }));
+    document.getElementById('musicTrack').dispatchEvent(
+      new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+  });
+  await expect.poll(async () => (await app.state()).music?.name).toBe('other.wav');
+  expect((await app.state()).sources).toHaveLength(0);
+});
+
+test('an audio source can be dragged onto the music lane', async ({ app }) => {
+  await addMusic(app);
+  await app.page.evaluate(async () => {
+    const blob = await (await fetch('/test/media/bed.wav')).blob();
+    await window.addSource(new File([blob], 'track.wav', { type: 'audio/wav' }));
+  });
+
+  await app.page.evaluate(`
+    const dt = new DataTransfer();
+    const row = document.querySelector('#sourceList .item');
+    row.dispatchEvent(new DragEvent('dragstart', { dataTransfer: dt, bubbles: true }));
+    document.getElementById('musicTrack').dispatchEvent(
+      new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+  `);
+
+  await expect.poll(async () => (await app.state()).music?.name).toBe('track.wav');
+  // The source stays: it is now both a source and the bed.
+  expect((await app.state()).sources).toHaveLength(1);
 });
 
 test('the music controls and waveform appear only with a bed loaded', async ({ app }) => {

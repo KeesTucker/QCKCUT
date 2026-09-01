@@ -556,3 +556,27 @@ kbd {
   background: #12141a;
 }
 .music-track[hidden] { display: none; }
+
+/* Audio sources have no pictures, so they read as blue rather than a poster */
+.track-item.audio {
+  background: linear-gradient(180deg, #16303f, #10202a);
+  border-color: #2b4a5e;
+}
+.track-item.audio::before { background: none; }
+.track-item.audio .track-item-name { color: #9ed4f5; }
+
+.music-track.over { outline: 1px dashed var(--accent); outline-offset: -3px; }
+
+/* The pending in point while a clip is being marked */
+.mark {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: #ffd23d;
+  box-shadow: 0 0 6px rgba(0, 0, 0, .9);
+  pointer-events: none;
+}
+.timeline.empty .mark,
+.timeline:not(.marking) .mark { display: none; }

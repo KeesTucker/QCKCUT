@@ -48,8 +48,7 @@ export const test = base.extend({
       async stripReady() {
         await expect.poll(async () => {
           const s = await app.state();
-          return s.stripsIdle && s.sources.length > 0
-            && s.sources.every((x) => x.thumbCount > 0 && x.thumbsDecoded === x.thumbCount);
+          return s.stripsIdle && s.sources.length > 0 && s.sources.every((x) => x.ready);
         }, { timeout: 30_000 }).toBe(true);
       },
 

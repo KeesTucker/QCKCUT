@@ -39,14 +39,16 @@ export async function renderClip(source, start, end, onProgress) {
  * resolves an item to its source. Output takes the first item's dimensions;
  * everything else is letterboxed into them.
  */
-export async function renderSequence(rows, sourceOf, onProgress, music = null) {
+export async function renderSequence(rows, sourceOf, onProgress, music = null, shape = null) {
   if (!rows.length) throw new Error('the sequence is empty');
-  const first = sourceOf(rows[0].item);
-  if (!first) throw new Error('the first item has no source');
+  // The caller picks the shape, because the first item may be audio and have
+  // no dimensions of its own.
+  const size = shape ?? { width: sourceOf(rows[0].item)?.width, height: sourceOf(rows[0].item)?.height };
+  if (!size?.width || !size?.height) throw new Error('the sequence has no dimensions');
 
   const canvas = document.createElement('canvas');
-  canvas.width = first.width;
-  canvas.height = first.height;
+  canvas.width = size.width;
+  canvas.height = size.height;
   const ctx = canvas.getContext('2d');
 
   const output = new Output({ format: new Mp4OutputFormat(), target: new BufferTarget() });
@@ -69,6 +71,17 @@ export async function renderSequence(rows, sourceOf, onProgress, music = null) {
   for (const row of rows) {
     const source = sourceOf(row.item);
     if (!source) continue;
+
+    // An audio-only item still occupies time, so it renders as black rather
+    // than being skipped, which would shorten the sequence and desync the mix.
+    if (!media.isVideo(source)) {
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      await video.add(row.start, row.duration);
+      onProgress?.(Math.min(1, row.end / total));
+      continue;
+    }
+
     await media.using(source, async ({ track }) => {
       const sink = new VideoSampleSink(track);
       // Iterated by hand so each frame can see the next one. A frame's duration

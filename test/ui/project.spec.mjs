@@ -54,3 +54,21 @@ test('an edit made immediately before a reload is not lost', async ({ app }) => 
   expect(clip.in).toBeCloseTo(2.25, 2);
   expect(clip.out).toBeCloseTo(4.5, 2);
 });
+
+// Regression: `kind` was not part of the stored record, so every restored
+// source came back looking like audio and its filmstrip never built.
+test('a restored source remembers whether it has pictures', async ({ app }) => {
+  await app.add('land');
+  await app.page.evaluate(async () => {
+    const blob = await (await fetch('/test/media/bed.wav')).blob();
+    await window.addSource(new File([blob], 'bed.wav', { type: 'audio/wav' }));
+  });
+  await app.stripReady();
+
+  await app.page.reload();
+  await expect.poll(async () => (await app.state()).sources.length, { timeout: 20_000 }).toBe(2);
+  await app.stripReady();
+
+  const kinds = Object.fromEntries((await app.state()).sources.map((s) => [s.name, s.kind]));
+  expect(kinds).toEqual({ 'land.mp4': 'video', 'bed.wav': 'audio' });
+});
