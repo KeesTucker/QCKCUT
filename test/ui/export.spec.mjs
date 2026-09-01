@@ -22,7 +22,7 @@ test('export writes a trimmed, decodable mp4', async ({ app }) => {
       HTMLAnchorElement.prototype.click = realClick;
     }
 
-    const mb = await import('mediabunny');
+    const mb = await import('/test/mediabunny.mjs');
     const input = new mb.Input({ source: new mb.BlobSource(captured), formats: mb.ALL_FORMATS });
     const track = await input.getPrimaryVideoTrack();
     const sink = new mb.VideoSampleSink(track);

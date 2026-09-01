@@ -22,7 +22,7 @@ export const test = base.extend({
       async add(...names) {
         for (const name of names) {
           await page.evaluate(async (n) => {
-            const blob = await (await fetch(`/tests/.fixtures/${n}.mp4`)).blob();
+            const blob = await (await fetch(`/test/media/${n}.mp4`)).blob();
             await window.addSource(new File([blob], `${n}.mp4`, { type: 'video/mp4' }));
           }, name);
         }
@@ -34,7 +34,7 @@ export const test = base.extend({
         await page.evaluate(async (ns) => {
           const dt = new DataTransfer();
           for (const n of ns) {
-            const blob = await (await fetch(`/tests/.fixtures/${n}.mp4`)).blob();
+            const blob = await (await fetch(`/test/media/${n}.mp4`)).blob();
             dt.items.add(new File([blob], `${n}.mp4`, { type: 'video/mp4' }));
           }
           document.dispatchEvent(

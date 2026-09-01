@@ -14,44 +14,64 @@ there is no backend.
 
 ## Commands
 
+Package manager is **pnpm** (pinned in `packageManager`).
+
 ```bash
-npm install
-npm run dev           # http://localhost:5173
-npm test              # the gate: 57 Playwright tests in real Chrome
-npm run test:report   # open the HTML report
+pnpm install
+pnpm dev              # Vite on http://localhost:5173
+pnpm test             # the gate: 57 Playwright tests in real Chrome
+pnpm build            # production bundle into dist/
+pnpm preview          # serve that bundle
+pnpm test:report      # open the HTML report
 ```
 
 Single file or single test:
 
 ```bash
-npx playwright test tests/ui/clips.spec.mjs --project=ui
-npx playwright test --project=ui -g "resize storm"
-npx playwright test --project=ui tests/ui/scrub.spec.mjs --debug
+pnpm exec playwright test test/ui/clips.spec.mjs --project=ui
+pnpm exec playwright test --project=ui -g "resize storm"
+pnpm exec playwright test --project=ui test/ui/scrub.spec.mjs --debug
 ```
 
 The browser is the locally installed Google Chrome (`channel: 'chrome'`), so
-there is no browser download after `npm install`.
+there is no browser download after `pnpm install`.
 
-## No build step, but a server is required
+## Layout
 
-There is no bundler and no transpiler. `index.html` loads `app.js` as a native
-ES module, and a five-line import map resolves the one bare specifier:
-
-```html
-<script type="importmap">
-{ "imports": { "mediabunny": "/node_modules/mediabunny/dist/bundles/mediabunny.min.mjs" } }
-</script>
+```
+index.html              Vite entry. Stays at the root; that is the convention.
+vite.config.js
+src/                    app.js, media.js, store.js, styles.css
+test/
+  fixture.mjs           encodes a synthetic clip in the browser
+  mediabunny.mjs        re-export, see below
+  fixtures.setup.mjs    the Playwright "setup" project
+  lib/                  the app fixture and the clip definitions
+  ui/                   specs
+  media/                generated .mp4 fixtures, gitignored
 ```
 
-That works because mediabunny ships a **pre-bundled single file**. Pointing the
-import map at its unbundled `dist/modules/` build would serialise 286 files into
-a request waterfall; that is the one real remaining argument for bundlers, and
-avoiding it is why we do not need one.
+`test/` rather than `tests/` is a coin flip in JS: Node core and the Mocha
+lineage use `test/`, the Jest lineage uses `tests/` or `__tests__/`. Neither is
+more correct. `src/` is close to universal.
 
-Unlike QCKSCRL this cannot run from `file://`: ES modules and the import map both
-need real HTTP origins. `server.mjs` is a zero-dependency static server that
-exists solely for that. Do not reach for Express; there is nothing dynamic to
-serve.
+## Vite
+
+Vite serves `src/` and `test/` straight from source in dev, resolves the
+`mediabunny` bare specifier, and bundles for production. Saving a file triggers a
+full reload rather than true HMR, because `app.js` wires listeners at module
+scope and has no `import.meta.hot` handlers. That is fine and deliberate: the
+project is restored from IndexedDB on boot, so a reload puts your sources and
+clips straight back.
+
+Two things follow from Vite that are easy to trip over:
+
+- **`page.evaluate` code is never transformed.** A bare `import('mediabunny')`
+  inside an evaluate block has nothing to resolve it. Page-side test code goes
+  through `/test/mediabunny.mjs`, a real module that re-exports the library so
+  Vite rewrites the specifier.
+- **Fixture media lives in `test/media/`, not a dot-directory.** Vite's static
+  middleware is awkward about serving those.
 
 ## Architecture
 
@@ -180,7 +200,7 @@ Two distinct paths, and they are not interchangeable:
 
 ## Test conventions
 
-- Specs import `test` from `tests/lib/app.mjs`, not from `@playwright/test`. The
+- Specs import `test` from `test/lib/app.mjs`, not from `@playwright/test`. The
   `app` fixture clears IndexedDB, reloads, and exposes `add()`, `drop()`,
   `state()`, `boxes()` and `rows()`. On teardown it asserts the page logged **no**
   errors, so a spec cannot pass while the console is on fire.
@@ -190,7 +210,7 @@ Two distinct paths, and they are not interchangeable:
   Waiting only on the active source is what let the shared-AbortController bug
   through.
 - Test clips are encoded in the browser by the `setup` project into
-  `tests/.fixtures/` (gitignored). No ffmpeg, no binaries in the repo.
+  `test/media/` (gitignored). No ffmpeg, no binaries in the repo.
 - **Fixtures use `keyFrameInterval: 2`.** An all-keyframe clip makes every
   seeking test pass for the wrong reason.
 - `window.*` test hooks are assigned at the bottom of `app.js`. Add to that
@@ -216,7 +236,7 @@ the failure: twice now the "flaky" test was reporting a real ordering bug.
   percentage `max-height` resolves against a content-sized track and is silently
   ignored, which let the canvas cover the timeline.
 - Adding a keybinding means updating the help table in `index.html`;
-  `tests/ui/help.spec.mjs` asserts the two agree.
+  `test/ui/help.spec.mjs` asserts the two agree.
 - Renaming an IndexedDB store needs a `VERSION` bump in `store.js` and a
   `deleteObjectStore` in the upgrade path. Currently at v2, which renamed `cuts`
   to `clips`.

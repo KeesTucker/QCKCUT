@@ -3,7 +3,7 @@ import { defineConfig } from '@playwright/test';
 const PORT = 5173;
 
 export default defineConfig({
-  testDir: 'tests',
+  testDir: 'test',
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   workers: process.env.CI ? 2 : undefined,
@@ -12,9 +12,9 @@ export default defineConfig({
     baseURL: `http://localhost:${PORT}`,
     trace: 'retain-on-failure',
   },
-  // The dev server is the app; there is no build step.
+  // Vite serves the app and the test fixtures straight from source.
   webServer: {
-    command: `node server.mjs`,
+    command: `pnpm exec vite --port ${PORT} --strictPort`,
     url: `http://localhost:${PORT}/`,
     reuseExistingServer: !process.env.CI,
     stdout: 'ignore',

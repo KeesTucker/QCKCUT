@@ -12,7 +12,7 @@ test('render test clips', async ({ page }) => {
 
   for (const [name, options] of Object.entries(FIXTURES)) {
     const bytes = await page.evaluate(async (opts) => {
-      const { makeClip } = await import('/tests/fixture.mjs');
+      const { makeClip } = await import('/test/fixture.mjs');
       const file = await makeClip(opts);
       return [...new Uint8Array(await file.arrayBuffer())];
     }, options);
