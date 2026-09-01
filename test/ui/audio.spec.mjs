@@ -73,14 +73,20 @@ test('muting stops audio being scheduled', async ({ app }) => {
   expect((await app.state()).muted).toBe(true);
 });
 
-test('M toggles sound and the button follows', async ({ app }) => {
+test('M toggles sound and the icon follows', async ({ app }) => {
   await app.add('land');
-  await expect(app.page.locator('#muteBtn')).toHaveText('Sound on');
+  const mute = app.page.locator('#muteBtn');
+  await expect(mute).toHaveAttribute('data-state', 'on');
+  await expect(mute.locator('.sound')).toBeVisible();
+
   await app.page.keyboard.press('m');
-  await expect(app.page.locator('#muteBtn')).toHaveText('Muted');
+  await expect(mute).toHaveAttribute('data-state', 'off');
+  await expect(mute.locator('.muted')).toBeVisible();
+  await expect(mute.locator('.sound')).toBeHidden();
   expect((await app.state()).muted).toBe(true);
+
   await app.page.keyboard.press('m');
-  await expect(app.page.locator('#muteBtn')).toHaveText('Sound on');
+  await expect(mute).toHaveAttribute('data-state', 'on');
 });
 
 test('dragging the filmstrip plays a scrub grain', async ({ app }) => {

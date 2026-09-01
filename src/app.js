@@ -28,6 +28,7 @@ const S = {
   playing: false,
   exporting: false,
   muted: false,
+  rate: 1,          // preview speed; never affects the export
 };
 
 const MIN_RANGE = 0.05;   // shortest selection we allow, seconds
@@ -69,6 +70,9 @@ const seqPlayBtn = $('seqPlay');
 const seqExportBtn = $('seqExport');
 const seqDurationEl = $('seqDuration');
 const muteBtn = $('muteBtn');
+const rateSel = $('rateSel');
+const controls = $('controls');
+const hintEl = $('hint');
 const musicGainWrap = $('musicGainWrap');
 const musicGain = $('musicGain');
 const musicName = $('musicName');
@@ -196,7 +200,7 @@ let playRun = null;
 export async function play() {
   if (S.playing || !held) return;
   S.playing = true;
-  playBtn.textContent = 'Pause';
+  playBtn.dataset.state = 'playing';
 
   const from = S.playhead >= S.out - 0.02 ? S.in : S.playhead;
   const stopping = new AbortController();
@@ -204,13 +208,14 @@ export async function play() {
 
   // Start the sound first, then take its clock. Video paced against
   // performance.now() drifts against the audio hardware's own timebase.
+  const rate = S.rate;
   const sound = S.muted ? null : await media.audioOf(held);
-  let elapsed = audio.wallClock();
+  let elapsed = audio.wallClock(rate);
   if (sound) {
     const ctx = audio.unlock();
     const startAt = ctx.currentTime + 0.06;   // a beat to get the first buffer out
-    elapsed = audio.audioClock(startAt);
-    audio.schedule({ sink: sound.sink, from, to: S.out, startAt, signal: stopping.signal })
+    elapsed = audio.audioClock(startAt, rate);
+    audio.schedule({ sink: sound.sink, from, to: S.out, startAt, signal: stopping.signal, rate })
       .catch(fail);
   }
 
@@ -241,7 +246,8 @@ export async function play() {
       try {
         if (!S.playing) break;
         const due = sample.timestamp - from;
-        const wait = (due - elapsed()) * 1000;
+        // elapsed() is media time, so the gap converts to wall time by the rate.
+        const wait = ((due - elapsed()) / rate) * 1000;
         // Drop a late frame rather than falling further behind, but never drop
         // the first one or the preview stays blank on a slow start.
         if (wait < -50 && painted) continue;
@@ -271,7 +277,7 @@ export function pause() {
   playRun?.abort();
   playRun = null;
   audio.stopScrub();
-  playBtn.textContent = 'Play';
+  playBtn.dataset.state = 'paused';
 }
 
 // ─── Filmstrip ───────────────────────────────────────────────────────────────
@@ -656,12 +662,14 @@ function row({ active: isActive, name, meta, onSelect, onDrop, drag }) {
 }
 
 const setStatus = (text) => { statusEl.textContent = text; };
+const setHint = (text) => { hintEl.textContent = text; };
 
 function updateUI() {
   const source = active();
   const loaded = !!source;
   timeline.classList.toggle('empty', !loaded);
   drop.classList.toggle('hidden', S.sources.length > 0);
+  controls.classList.toggle('hidden', !loaded);
   for (const b of [playBtn, exportBtn, markInBtn, markOutBtn, addClipBtn]) b.disabled = !loaded;
   fileNameEl.textContent = loaded ? describe(source) : 'no clip';
   renderSources();
@@ -792,7 +800,7 @@ export async function markClip() {
   if (!source) return null;
   if (!S.marking) {
     beginMark();
-    setStatus('marking… press C again to keep it, Esc to cancel');
+    setHint('marking… C again to keep it, Esc to cancel');
     return null;
   }
 
@@ -800,11 +808,11 @@ export async function markClip() {
   const span = S.out - S.in;
   S.marking = null;
   if (span < MIN_RANGE) {
-    setStatus('too short to keep');
+    setHint('too short to keep');
     updateUI();
     return null;
   }
-  setStatus('');
+  setHint('');
   return addClip();
 }
 
@@ -1084,10 +1092,11 @@ export async function playSequence() {
   // One clock for the whole sequence, anchored before the first frame. Each
   // item's audio is scheduled onto it at that item's own offset, so sound stays
   // continuous across the cuts even though the decoders change.
+  const rate = S.rate;
   const ctx = audio.unlock();
   const startAt = ctx.currentTime + 0.06;
-  const elapsed = S.muted ? audio.wallClock() : audio.audioClock(startAt);
-  if (!S.muted) startMusic(startAt, origin, total - origin);
+  const elapsed = S.muted ? audio.wallClock(rate) : audio.audioClock(startAt, rate);
+  if (!S.muted) startMusic(startAt, origin, total - origin, rate);
 
   let painted = false;
   try {
@@ -1108,8 +1117,9 @@ export async function playSequence() {
             sink: sound.sink,
             from,
             to: row.item.out,
-            startAt: startAt + (Math.max(origin, row.start) - origin),
+            startAt: startAt + (Math.max(origin, row.start) - origin) / rate,
             signal: stopping.signal,
+            rate,
           }).catch(fail);
         }
       }
@@ -1133,7 +1143,7 @@ export async function playSequence() {
           try {
             if (!S.playingSeq) break;
             const at = row.start + (sample.timestamp - row.item.in);
-            const wait = (at - origin - elapsed()) * 1000;
+            const wait = ((at - origin - elapsed()) / rate) * 1000;
             if (wait < -50 && painted) continue;
             if (wait > 0) await sleep(wait);
             if (!S.playingSeq) break;
@@ -1284,7 +1294,7 @@ function renderMusic() {
 // sequence and stopped when playback stops.
 let musicNode = null;
 
-function startMusic(startAt, offset, duration) {
+function startMusic(startAt, offset, duration, rate = 1) {
   stopMusic();
   const music = S.music;
   if (!music || S.muted || music.gain <= 0) return;
@@ -1295,6 +1305,9 @@ function startMusic(startAt, offset, duration) {
   const level = ctx.createGain();
   level.gain.value = music.gain;
   node.buffer = music.buffer;
+  // The bed is tied to sequence time, so it has to follow the rate too, or it
+  // slides away from the picture.
+  node.playbackRate.value = rate;
   node.connect(level).connect(ctx.destination);
   node.start(Math.max(startAt, ctx.currentTime), offset,
     Math.min(music.buffer.duration - offset, duration));
@@ -1354,8 +1367,21 @@ export function setMuted(muted) {
     audio.stopScrub();
     stopMusic();
   }
-  muteBtn.textContent = muted ? 'Muted' : 'Sound on';
+  muteBtn.dataset.state = muted ? 'off' : 'on';
+  muteBtn.setAttribute('aria-label', muted ? 'Unmute' : 'Mute');
 }
+
+/** Preview speed. Export always renders at 1x. */
+export function setRate(rate) {
+  S.rate = clamp(Number(rate) || 1, 0.25, 4);
+  if (rateSel.value !== String(S.rate)) rateSel.value = String(S.rate);
+  // A rate change mid-playback would need every scheduled buffer rescheduled,
+  // so restart instead: far simpler, and imperceptible at these lengths.
+  if (S.playing) { pause(); play().catch(fail); }
+  else if (S.playingSeq) { stopSequence(); playSequence().catch(fail); }
+}
+
+rateSel.addEventListener('change', () => setRate(rateSel.value));
 
 muteBtn.addEventListener('click', () => setMuted(!S.muted));
 
@@ -1459,7 +1485,7 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'm') return setMuted(!S.muted);
   if (event.key === 'Escape') {
     if (helpOpen()) return closeHelp();
-    if (cancelMark()) return setStatus('');
+    if (cancelMark()) return setHint('');
   }
   if (!held || helpOpen()) return;
   const frame = 1 / 30;
@@ -1663,6 +1689,7 @@ export function snapshot() {
     seqPlayhead: S.seqPlayhead,
     playingSeq: S.playingSeq,
     muted: S.muted,
+    rate: S.rate,
     marking: S.marking ? { at: S.marking.at } : null,
     kind: source?.kind ?? null,
     music: S.music
@@ -1680,6 +1707,8 @@ export function snapshot() {
   };
 }
 
+setMuted(false);
+setRate(1);
 updateUI();
 
 // Test hooks. The UI tests reach in by these names.
@@ -1689,7 +1718,7 @@ Object.assign(window, {
   addClip, markClip, beginMark, cancelMark, selectClip, removeClip, exportRange, buildStrip, queueStrip, drawStrip, stripsIdle,
   sequence, render, addToSequence, removeFromSequence, moveInSequence, selectItem,
   appendRange, playSequence, stopSequence, exportSequence, sequenceShape,
-  audio, setMusic, setMusicFromSource, removeMusic, setMusicGain, setMuted,
+  audio, setMusic, setMusicFromSource, removeMusic, setMusicGain, setMuted, setRate,
   timecode, parseTimecode, clamp, clipLabel, exportName, setClipRange,
 });
 

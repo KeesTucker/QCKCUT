@@ -31,9 +31,39 @@
 
   <section id="stage" class="stage">
     <canvas id="preview"></canvas>
+
+    <div id="controls" class="controls hidden">
+      <button id="playBtn" class="ctl" data-state="paused" aria-label="Play" title="Play or pause (Space)" disabled>
+        <svg class="icon play" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 2.6 13 8l-8.5 5.4z"/></svg>
+        <svg class="icon pause" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 3h3v10H4zM9 3h3v10H9z"/></svg>
+      </button>
+
+      <span id="time" class="time">0:00.00 / 0:00.00</span>
+
+      <select id="rateSel" class="rate" aria-label="Playback speed" title="Playback speed">
+        <option value="0.25">0.25&times;</option>
+        <option value="0.5">0.5&times;</option>
+        <option value="1" selected>1&times;</option>
+        <option value="1.5">1.5&times;</option>
+        <option value="2">2&times;</option>
+        <option value="4">4&times;</option>
+      </select>
+
+      <button id="muteBtn" class="ctl" data-state="on" aria-label="Mute" title="Mute (M)">
+        <svg class="icon sound" viewBox="0 0 16 16" aria-hidden="true">
+          <path d="M3 6h2.4L8.6 3.2v9.6L5.4 10H3z"/>
+          <path class="wave" d="M10.6 5.8a3.2 3.2 0 0 1 0 4.4M12.5 4a5.8 5.8 0 0 1 0 8"/>
+        </svg>
+        <svg class="icon muted" viewBox="0 0 16 16" aria-hidden="true">
+          <path d="M3 6h2.4L8.6 3.2v9.6L5.4 10H3z"/>
+          <path class="wave" d="M10.8 6.2l3.4 3.6M14.2 6.2l-3.4 3.6"/>
+        </svg>
+      </button>
+    </div>
+
     <div id="drop" class="drop">
       <p>Drop a video here</p>
-      <p class="hint">mp4, mov, webm, mkv</p>
+      <p class="hint">mp4, mov, webm, mkv, mp3, wav</p>
     </div>
   </section>
 
@@ -49,13 +79,11 @@
 </main>
 
 <section class="transport">
-  <button id="playBtn" disabled>Play</button>
-  <button id="muteBtn" title="Mute preview (M)">Sound on</button>
-  <span id="time" class="time">0:00.00 / 0:00.00</span>
-  <span class="spacer"></span>
   <button id="markIn" disabled>Mark in</button>
   <button id="markOut" disabled>Mark out</button>
   <span id="range" class="time">in 0:00.00 &middot; out 0:00.00</span>
+  <span class="spacer"></span>
+  <span id="hint" class="status"></span>
 </section>
 
 <section id="timeline" class="timeline empty">
@@ -128,9 +156,13 @@
 
       <section>
         <h4>Sound</h4>
-        <p>The preview plays audio, and dragging the filmstrip plays a short
-        grain at the playhead so you can hear where you are. <kbd>M</kbd> mutes
-        it. The music bed plays
+        <p>The controls sit over the picture: play, the speed, and the speaker.
+        Dragging the filmstrip plays a short grain at the playhead so you can
+        hear where you are, and <kbd>M</kbd> mutes everything.</p>
+        <p>Speeds from 0.25&times; to 4&times; affect the preview only, never the
+        export. Sound follows the speed, which shifts its pitch: keeping the
+        pitch would need time-stretching that browsers do not provide.</p>
+        <p> The music bed plays
         under the sequence and is mixed into the exported file at whatever level
         you set, trimmed to the sequence length. Drop a file, or drag a source, onto the
         waveform lane under the sequence to set it.</p>

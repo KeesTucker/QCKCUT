@@ -580,3 +580,71 @@ kbd {
 }
 .timeline.empty .mark,
 .timeline:not(.marking) .mark { display: none; }
+
+/* Playback controls, floating over the picture so it is obvious what they
+   drive. Editing controls stay in the transport bar below. */
+.controls {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  transform: translateX(-50%);
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: 10px;
+  background: rgba(14, 15, 18, .72);
+  backdrop-filter: blur(8px);
+  opacity: .72;
+  transition: opacity .14s;
+}
+.stage:hover .controls,
+.controls:focus-within { opacity: 1; }
+.controls.hidden { display: none; }
+
+.controls .time { padding: 0 4px; color: #c8ccd6; }
+
+.ctl {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: none;
+  border-radius: 7px;
+  background: none;
+  color: var(--text);
+}
+.ctl:hover:not(:disabled) { background: rgba(255, 255, 255, .12); }
+.ctl:disabled { opacity: .4; }
+
+.ctl .icon { width: 16px; height: 16px; }
+.icon path { fill: currentColor; }
+.icon .wave {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+}
+
+/* One button, two glyphs: the state attribute picks which is shown. */
+#playBtn[data-state="paused"] .pause,
+#playBtn[data-state="playing"] .play,
+#muteBtn[data-state="on"] .muted,
+#muteBtn[data-state="off"] .sound { display: none; }
+
+#muteBtn[data-state="off"] { color: var(--accent); }
+
+.rate {
+  padding: 3px 4px;
+  border: 1px solid rgba(255, 255, 255, .14);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .06);
+  color: var(--text);
+  font: 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+.rate:hover { border-color: rgba(255, 255, 255, .3); }
+.rate option { background: var(--panel); color: var(--text); }

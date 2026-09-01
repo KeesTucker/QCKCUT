@@ -32,13 +32,15 @@ export const now = () => audio().currentTime;
  * `wallClock` is the fallback for silent media. `audioClock` reads the same
  * timebase the sound is scheduled on, which is what keeps them locked.
  */
-export function wallClock() {
+// Both clocks report elapsed *media* time, so a rate of 2 means they advance
+// twice as fast as the wall. Callers convert back to wall time when sleeping.
+export function wallClock(rate = 1) {
   const started = performance.now();
-  return () => (performance.now() - started) / 1000;
+  return () => ((performance.now() - started) / 1000) * rate;
 }
 
-export function audioClock(startAt) {
-  return () => audio().currentTime - startAt;
+export function audioClock(startAt, rate = 1) {
+  return () => (audio().currentTime - startAt) * rate;
 }
 
 /** How far ahead of the playhead we schedule buffers. */
@@ -53,26 +55,32 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * Buffers are scheduled just in time rather than all at once: a long range
  * would otherwise create thousands of nodes up front.
  */
-export async function schedule({ sink, from, to, startAt, destination, signal }) {
+export async function schedule({ sink, from, to, startAt, destination, signal, rate = 1 }) {
   const ctx = audio();
   const out = destination ?? ctx.destination;
 
   for await (const { buffer, timestamp } of sink.buffers(from, to)) {
     if (signal?.aborted) return;
 
-    const when = startAt + (timestamp - from);
-    while (!signal?.aborted && when - ctx.currentTime > LOOKAHEAD) {
+    // Media time maps to wall time by the rate: at 2x, a buffer a second into
+    // the range is heard half a second in.
+    const when = startAt + (timestamp - from) / rate;
+    while (!signal?.aborted && when - ctx.currentTime > LOOKAHEAD / rate) {
       await sleep(60);
     }
     if (signal?.aborted) return;
 
     // A buffer can start before the range does, so trim from the front rather
-    // than scheduling in the past, which would drop it silently.
-    const offset = when < ctx.currentTime ? ctx.currentTime - when : 0;
+    // than scheduling in the past, which would drop it silently. The offset is
+    // in buffer seconds, so late wall time scales back up by the rate.
+    const offset = when < ctx.currentTime ? (ctx.currentTime - when) * rate : 0;
     if (offset >= buffer.duration) continue;
 
     const node = ctx.createBufferSource();
     node.buffer = buffer;
+    // playbackRate shifts pitch. Pitch-preserving stretch needs a phase
+    // vocoder, which Web Audio does not provide.
+    node.playbackRate.value = rate;
     node.connect(out);
     node.start(Math.max(when, ctx.currentTime), offset);
     signal?.addEventListener('abort', () => { try { node.stop(); } catch {} }, { once: true });
