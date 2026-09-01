@@ -1,10 +1,18 @@
 {
-  "name": "QCKCUT",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "name": "qckcut",
+  "version": "0.1.0",
+  "description": "Browser video highlight cutter",
+  "private": true,
+  "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "node server.mjs",
+    "test": "playwright test --project=ui",
+    "test:report": "playwright show-report"
   },
-  "private": true
+  "devDependencies": {
+    "@playwright/test": "^1.62.1"
+  },
+  "dependencies": {
+    "mediabunny": "^1.55.5"
+  }
 }

@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QCKCUT</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="styles.css">
+<script type="importmap">
+{ "imports": { "mediabunny": "/node_modules/mediabunny/dist/bundles/mediabunny.min.mjs" } }
+</script>
+</head>
+<body>
+
+<header class="bar">
+  <h1>QCKCUT</h1>
+  <button class="help-btn" id="helpBtn" aria-label="Help" aria-haspopup="dialog" title="Help">?</button>
+  <span id="fileName" class="filename">no clip</span>
+  <span class="spacer"></span>
+  <span id="status" class="status"></span>
+  <button id="exportBtn" disabled>Export</button>
+</header>
+
+<main class="workspace">
+
+  <aside class="panel panel-left">
+    <div class="panel-head">
+      <h2>Sources</h2>
+      <button id="addSource" class="ghost" title="Add a video">+</button>
+    </div>
+    <ul id="sourceList" class="list"></ul>
+    <p id="sourceEmpty" class="empty">Drop videos anywhere</p>
+  </aside>
+
+  <section id="stage" class="stage">
+    <canvas id="preview"></canvas>
+    <div id="drop" class="drop">
+      <p>Drop a video here</p>
+      <p class="hint">mp4, mov, webm, mkv</p>
+    </div>
+  </section>
+
+  <aside class="panel panel-right">
+    <div class="panel-head">
+      <h2>Clips</h2>
+      <button id="addClip" class="ghost" title="Clip from the current in and out (C)" disabled>+</button>
+    </div>
+    <ul id="clipList" class="list"></ul>
+    <p id="clipEmpty" class="empty">Mark in and out, then press C</p>
+  </aside>
+
+</main>
+
+<section class="transport">
+  <button id="playBtn" disabled>Play</button>
+  <span id="time" class="time">0:00.00 / 0:00.00</span>
+  <span class="spacer"></span>
+  <button id="markIn" disabled>Mark in</button>
+  <button id="markOut" disabled>Mark out</button>
+  <span id="range" class="time">in 0:00.00 &middot; out 0:00.00</span>
+</section>
+
+<section id="timeline" class="timeline empty">
+  <canvas id="strip"></canvas>
+  <div id="selection" class="selection"></div>
+  <div id="handleIn" class="handle handle-in"></div>
+  <div id="handleOut" class="handle handle-out"></div>
+  <div id="playheadEl" class="playhead"></div>
+</section>
+
+<div class="help-overlay" id="helpOverlay">
+  <div class="help-box" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
+    <div class="help-head">
+      <h3 id="helpTitle">How QCKCUT works</h3>
+      <button class="icon-btn help-close" id="helpCloseBtn" aria-label="Close help">&#10005;</button>
+    </div>
+    <div class="help-body">
+
+      <section>
+        <h4>Sources</h4>
+        <p>Drop video files anywhere on the page, or press <kbd>+</kbd> in the Sources panel.
+        Everything stays on your machine: nothing is uploaded, and the project is saved in
+        this browser so it is still here when you come back.</p>
+      </section>
+
+      <section>
+        <h4>Clips</h4>
+        <p>Scrub the filmstrip to find a moment, set the range with <kbd>I</kbd> and <kbd>O</kbd>,
+        then press <kbd>C</kbd> to keep it as a clip. A clip is only a reference to a start and
+        end time in its source, so making one costs nothing and deletes nothing. Click a clip to
+        select it and type exact times into the boxes that appear, or drag the handles on the
+        filmstrip. Every clip on the current source shows as a band along the bottom of the
+        filmstrip.</p>
+      </section>
+
+      <section>
+        <h4>Export</h4>
+        <p><kbd>Export</kbd> renders the current range to an MP4 and downloads it, keeping the
+        audio. Encoding runs on your GPU, so it is usually several times faster than the clip
+        is long.</p>
+      </section>
+
+      <section>
+        <h4>Keys</h4>
+        <table class="keys">
+          <tr><td><kbd>Space</kbd></td><td>Play or pause the selected range</td></tr>
+          <tr><td><kbd>&larr;</kbd> <kbd>&rarr;</kbd></td><td>Step one frame</td></tr>
+          <tr><td><kbd>Shift</kbd> <kbd>&larr;</kbd> <kbd>&rarr;</kbd></td><td>Jump one second</td></tr>
+          <tr><td><kbd>I</kbd></td><td>Mark in at the playhead</td></tr>
+          <tr><td><kbd>O</kbd></td><td>Mark out at the playhead</td></tr>
+          <tr><td><kbd>C</kbd></td><td>Make a clip from the current range</td></tr>
+          <tr><td><kbd>?</kbd></td><td>Open this help</td></tr>
+          <tr><td><kbd>Esc</kbd></td><td>Close this help</td></tr>
+        </table>
+      </section>
+
+    </div>
+  </div>
+</div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

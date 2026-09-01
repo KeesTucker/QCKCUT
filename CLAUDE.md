@@ -1,0 +1,233 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this is
+
+QCKCUT is a browser-based highlight cutter: you drop long videos in, scrub them,
+mark ranges as clips, and export a trimmed MP4. Sister project to QCKSCRL, which
+does the same trick for photo carousels.
+
+Everything runs client-side. Decoding, compositing and encoding all go through
+the platform's hardware video pipeline via WebCodecs. Nothing is uploaded, and
+there is no backend.
+
+## Commands
+
+```bash
+npm install
+npm run dev           # http://localhost:5173
+npm test              # the gate: 57 Playwright tests in real Chrome
+npm run test:report   # open the HTML report
+```
+
+Single file or single test:
+
+```bash
+npx playwright test tests/ui/clips.spec.mjs --project=ui
+npx playwright test --project=ui -g "resize storm"
+npx playwright test --project=ui tests/ui/scrub.spec.mjs --debug
+```
+
+The browser is the locally installed Google Chrome (`channel: 'chrome'`), so
+there is no browser download after `npm install`.
+
+## No build step, but a server is required
+
+There is no bundler and no transpiler. `index.html` loads `app.js` as a native
+ES module, and a five-line import map resolves the one bare specifier:
+
+```html
+<script type="importmap">
+{ "imports": { "mediabunny": "/node_modules/mediabunny/dist/bundles/mediabunny.min.mjs" } }
+</script>
+```
+
+That works because mediabunny ships a **pre-bundled single file**. Pointing the
+import map at its unbundled `dist/modules/` build would serialise 286 files into
+a request waterfall; that is the one real remaining argument for bundlers, and
+avoiding it is why we do not need one.
+
+Unlike QCKSCRL this cannot run from `file://`: ES modules and the import map both
+need real HTTP origins. `server.mjs` is a zero-dependency static server that
+exists solely for that. Do not reach for Express; there is nothing dynamic to
+serve.
+
+## Architecture
+
+### Three modules
+
+- `store.js` — IndexedDB. Sources hold blobs, which localStorage cannot take.
+- `media.js` — opening media, the decoder pool, filmstrip tile decoding.
+- `app.js` — state, rendering, and all DOM wiring.
+
+`app.js` keeps QCKSCRL's shape: one mutable `S`, mutated and then followed by an
+explicit `updateUI()` / `drawStrip()` / `renderClips()` call. There is no
+reactive layer.
+
+### A clip is a reference, never a copy
+
+```js
+S.sources = [{ id, name, blob, duration, width, height, codec, thumbs, thumbCount, poster }]
+S.clips   = [{ id, sourceId, in, out, label }]
+```
+
+A clip is two numbers and a source id. That is the whole design: creating one
+costs nothing, adjusting one edits two floats, and deleting one destroys no
+media. It is also the exact shape a timeline clip will take when sequencing
+lands, which will add only a `start` field for its position on the timeline.
+
+`sourceOf(clip)` and `clipsFor(sourceId)` are the only ways to cross the
+reference. Never denormalise source data onto a clip.
+
+## Invariants that will bite you
+
+These are not style preferences. Each one has already produced a bug with a
+regression test named after it.
+
+### Every VideoSample must be closed
+
+A `VideoSample` wraps a GPU-resident `VideoFrame`. An unclosed one pins GPU
+memory, and once the decoder's output queue fills it stalls silently. Every
+`getSample` and every `for await (... of sink.samples())` body is wrapped in
+`try/finally { sample.close() }`. Keep it that way.
+
+### Every Input must be disposed
+
+Each `Input` holds a hardware decoder, and the pool is finite. Opening one per
+source and never closing them fails after roughly eight imports with a bare
+`EncodingError: Decoding error` that names nothing.
+
+`media.js` owns this. Sources are opened lazily through `acquire()`, and the
+least recently touched **idle** entry is closed once `MAX_OPEN` (4) is exceeded.
+Every `acquire()` needs a matching `release()`; use `using()` when the operation
+is a single awaited call.
+
+`using()` cannot wrap an async generator: it awaits its action, which for a
+generator resolves before a single item is consumed, releasing the decoder while
+it is still needed. `media.tiles()` acquires and releases by hand for that
+reason.
+
+### Filmstrips build one at a time
+
+`evict()` will not close an in-use entry, so N parallel builds each holding a
+decoder exhausts the pool with nothing evictable. `queueStrip()` serialises them
+through a promise chain. Do not call `buildStrip()` directly from new code.
+
+Each source also gets **its own** `AbortController` in `stripRuns`. A single
+shared controller meant starting the second source's strip aborted the first,
+leaving it with one tile out of twenty-three.
+
+### Pixels never touch the CPU
+
+Frames enter the GPU at decode and leave at encode. `sample.drawWithFit(ctx,…)`
+keeps them there. One `getImageData`, `toBlob` or stray pixel read forces a
+GPU→CPU sync and turns 60fps into single digits. The only `getImageData` in the
+repo is in a test.
+
+### Resize must never decode
+
+Tiles are decoded once per source at a column count sized for
+`window.screen.width`, then re-blitted by `drawStrip()` on resize with a
+centre-crop per column. Calling `buildStrip()` from the resize handler spun up a
+`CanvasSink` per event, exhausted the pool, flickered the strip, and took
+playback down with it.
+
+### Re-rendering must not detach a focused input
+
+Detaching an element from the DOM blurs it, and `replaceChildren` detaches every
+child even when you hand it back the same nodes. `renderClips()` therefore only
+rebuilds when the list's *shape* changes (`shapeOf()`: the clip ids plus the
+selected id); a pure value change goes through `syncClipRows()`, which updates
+text in place. The editor node is likewise reused for as long as the same clip
+stays selected, and `setField()` never overwrites a field that has focus.
+
+Without all three, typing a time and pressing Enter could commit the old value,
+because a background `updateUI()` had replaced the input in between.
+
+### Mutate state before awaiting a write
+
+`setClipRange()` applies the new range to `S` *before* `await store.putClip()`.
+Persisting first leaves a window in which `clip.in` has changed but the timeline
+selection has not, and that window is observable from outside.
+
+The same shape of bug appears in tests: most UI actions start an async chain and
+their intermediate states are visible. See "Async races in specs" below.
+
+### IndexedDB writes resolve on the transaction
+
+`request.onsuccess` fires *before* the transaction commits. Resolving there and
+then navigating away aborts the write, silently losing any edit made just before
+a reload. `run()` in `store.js` resolves on `transaction.oncomplete`.
+
+## How seeking works
+
+`VideoSampleSink.getSample(t)` handles the keyframe hunt, forward decode, and
+intra-GOP caching internally. This is the single biggest reason mediabunny earns
+its place; hand-rolling it was estimated at most of a week.
+
+Measured on a 60s 720p clip with a 2-second GOP: cold random seek 13.6ms average,
+backwards frame-stepping 17.9ms average. Export runs at roughly 3x realtime.
+
+Two distinct paths, and they are not interchangeable:
+
+- **Scrubbing** uses `getSample`, coalesced so at most one decode is in flight
+  and only the newest requested time survives. Without the coalescing a fast drag
+  queues hundreds of decodes and the preview lags seconds behind the pointer.
+- **Playback** iterates `sink.samples(from, to)` and paces to the wall clock.
+  Iterating forward is far cheaper than seeking per frame because there is no
+  repeated keyframe hunt.
+
+## Test conventions
+
+- Specs import `test` from `tests/lib/app.mjs`, not from `@playwright/test`. The
+  `app` fixture clears IndexedDB, reloads, and exposes `add()`, `drop()`,
+  `state()`, `boxes()` and `rows()`. On teardown it asserts the page logged **no**
+  errors, so a spec cannot pass while the console is on fire.
+- `app.state()` reads `window.snapshot()` rather than poking at `S` directly, so
+  specs do not couple to internal field layout.
+- `app.stripReady()` waits for *every* source's strip, not just the active one.
+  Waiting only on the active source is what let the shared-AbortController bug
+  through.
+- Test clips are encoded in the browser by the `setup` project into
+  `tests/.fixtures/` (gitignored). No ffmpeg, no binaries in the repo.
+- **Fixtures use `keyFrameInterval: 2`.** An all-keyframe clip makes every
+  seeking test pass for the wrong reason.
+- `window.*` test hooks are assigned at the bottom of `app.js`. Add to that
+  object when a spec needs a new entry point.
+
+### Async races in specs
+
+Most UI actions start an async chain, and intermediate states are observable.
+`selectClip` assigns `activeId` inside `setActive` before it assigns the range,
+so polling on `activeId` succeeds while `in`/`out` are still stale. Poll on the
+last field the operation writes, or on the whole condition at once.
+
+A test that passes alone and fails in the full run is usually this, not
+infrastructure. Reproduce with `--repeat-each=4` before assuming flake, and read
+the failure: twice now the "flaky" test was reporting a real ordering bug.
+
+## Other gotchas
+
+- `S.thumbs` holds **copies**. `CanvasSink` recycles its canvases through a pool,
+  so a retained reference gets overwritten by a later frame.
+- The preview canvas is the source's native pixel size, usually larger than the
+  stage. It is `position: absolute` with `object-fit: contain` because a
+  percentage `max-height` resolves against a content-sized track and is silently
+  ignored, which let the canvas cover the timeline.
+- Adding a keybinding means updating the help table in `index.html`;
+  `tests/ui/help.spec.mjs` asserts the two agree.
+- Renaming an IndexedDB store needs a `VERSION` bump in `store.js` and a
+  `deleteObjectStore` in the upgrade path. Currently at v2, which renamed `cuts`
+  to `clips`.
+- `store.clearAll()` clears the database, not the in-memory `S`. Reload after it.
+- `row()` returns `{ el, name, meta }`, not an element, so callers can update the
+  text nodes in place instead of rebuilding the row.
+
+## Not built yet
+
+Sequencing. Clips cannot yet be dragged onto a timeline and played back as a
+sequence. The hard part there is decoder pre-roll: without opening the next
+clip's decoder before the boundary, playback stalls at every cut. Audio preview
+is also absent; export preserves the source audio track, but the preview is
+video-only.
