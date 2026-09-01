@@ -29,6 +29,7 @@ const S = {
   exporting: false,
   muted: false,
   rate: 1,          // preview speed; never affects the export
+  view: 'source',   // which of the two things the viewer is showing
 };
 
 const MIN_RANGE = 0.05;   // shortest selection we allow, seconds
@@ -66,11 +67,14 @@ const addSourceBtn = $('addSource');
 const sourceList = $('sourceList');
 const clipList = $('clipList');
 const track = $('track');
-const seqPlayBtn = $('seqPlay');
 const seqExportBtn = $('seqExport');
 const seqDurationEl = $('seqDuration');
 const muteBtn = $('muteBtn');
 const rateSel = $('rateSel');
+const viewBadge = $('viewBadge');
+const viewKind = $('viewKind');
+const viewName = $('viewName');
+const sequenceEl = document.querySelector('.sequence');
 const controls = $('controls');
 const hintEl = $('hint');
 const musicGainWrap = $('musicGainWrap');
@@ -419,8 +423,12 @@ const xForTime = (t) => (t / (active()?.duration || 1)) * timeline.clientWidth;
 const timeForX = (x) => (x / timeline.clientWidth) * (active()?.duration || 0);
 
 function updateTransport() {
-  const duration = active()?.duration ?? 0;
-  timeEl.textContent = `${timecode(S.playhead)} / ${timecode(duration)}`;
+  if (S.view === 'sequence') {
+    const total = sequence.totalDuration(S.timeline);
+    timeEl.textContent = `${timecode(S.seqPlayhead)} / ${timecode(total)}`;
+  } else {
+    timeEl.textContent = `${timecode(S.playhead)} / ${timecode(active()?.duration ?? 0)}`;
+  }
   playheadEl.style.left = `${xForTime(S.playhead)}px`;
 }
 
@@ -456,6 +464,7 @@ function renderSources() {
       onSelect: () => setActive(source.id).catch(fail),
       onDrop: () => removeSource(source.id).catch(fail),
       drag: { kind: 'source', id: source.id },
+      rename: { read: () => source.name, write: (next) => renameSource(source.id, next) },
     });
     const poster = document.createElement('canvas');
     poster.width = 56;
@@ -493,6 +502,7 @@ function renderClips() {
       onSelect: () => selectClip(clip.id).catch(fail),
       onDrop: () => removeClip(clip.id).catch(fail),
       drag: { kind: 'clip', id: clip.id },
+      rename: { read: () => clip.label, write: (next) => renameClip(clip.id, next) },
     });
     const swatch = document.createElement('span');
     swatch.className = 'swatch';
@@ -509,7 +519,7 @@ function syncClipRows() {
     const parts = clipRows.get(clip.id);
     if (!parts) continue;
     const source = sourceOf(clip);
-    parts.name.textContent = clip.label;
+    if (!parts.name.dataset.editing) parts.name.textContent = clip.label;
     parts.meta.textContent = clipMeta(clip, source);
     if (editor?.clipId === clip.id) syncEditor(clip, source);
   }
@@ -618,7 +628,57 @@ export async function setClipRange(id, start, end) {
   return clip;
 }
 
-function row({ active: isActive, name, meta, onSelect, onDrop, drag }) {
+/**
+ * Double-click a label to rename it in place.
+ *
+ * Chosen over a context menu or a modal: there is no new surface to position,
+ * dismiss or keyboard-trap, the thing being renamed stays exactly where it is,
+ * and it is the pattern people already know from file managers and layer lists.
+ * A custom context menu also has to fight the browser's own.
+ */
+function renameable(label, read, write) {
+  label.title = 'Double-click to rename';
+  label.addEventListener('dblclick', (event) => {
+    event.stopPropagation();
+    if (label.dataset.editing) return;
+    label.dataset.editing = '1';
+
+    const input = document.createElement('input');
+    input.className = 'rename';
+    input.value = read();
+    label.replaceChildren(input);
+    input.focus();
+    input.select();
+
+    let done = false;
+    const finish = (save) => {
+      if (done) return;
+      done = true;
+      delete label.dataset.editing;
+      const next = input.value.trim();
+      if (save && next && next !== read()) {
+        // Show the new name straight away rather than after the write.
+        label.replaceChildren(document.createTextNode(next));
+        write(next).catch(fail);
+      } else {
+        label.replaceChildren(document.createTextNode(read()));
+      }
+    };
+
+    input.addEventListener('keydown', (e) => {
+      e.stopPropagation();          // app shortcuts must not fire while typing
+      if (e.key === 'Enter') finish(true);
+      else if (e.key === 'Escape') finish(false);
+    });
+    input.addEventListener('blur', () => finish(true));
+    // Clicks inside the field must not reach the row behind it.
+    for (const type of ['click', 'pointerdown', 'dblclick']) {
+      input.addEventListener(type, (e) => e.stopPropagation());
+    }
+  });
+}
+
+function row({ active: isActive, name, meta, onSelect, onDrop, drag, rename }) {
   const item = document.createElement('div');
   item.className = `item${isActive ? ' active' : ''}`;
   item.tabIndex = 0;
@@ -641,6 +701,8 @@ function row({ active: isActive, name, meta, onSelect, onDrop, drag }) {
     event.stopPropagation();
     onDrop();
   });
+
+  if (rename) renameable(title, rename.read, rename.write);
 
   if (drag) {
     item.draggable = true;
@@ -669,8 +731,9 @@ function updateUI() {
   const loaded = !!source;
   timeline.classList.toggle('empty', !loaded);
   drop.classList.toggle('hidden', S.sources.length > 0);
-  controls.classList.toggle('hidden', !loaded);
-  for (const b of [playBtn, exportBtn, markInBtn, markOutBtn, addClipBtn]) b.disabled = !loaded;
+  controls.classList.toggle('hidden', !loaded && !S.timeline.length);
+  for (const b of [exportBtn, markInBtn, markOutBtn, addClipBtn]) b.disabled = !loaded;
+  playBtn.disabled = S.view === 'sequence' ? !S.timeline.length : !loaded;
   fileNameEl.textContent = loaded ? describe(source) : 'no clip';
   renderSources();
   renderClips();
@@ -678,6 +741,7 @@ function updateUI() {
   renderMusic();
   updateRange();
   updateMark();
+  updateView();
   updateTransport();
   drawStrip();
 }
@@ -845,6 +909,33 @@ export async function selectClip(id) {
   await seek(clip.in);
 }
 
+export async function renameSource(id, name) {
+  const source = sourceById(id);
+  if (!source || !name) return null;
+  source.name = name;
+  await store.putSource(source);
+  updateUI();
+  return source;
+}
+
+export async function renameClip(id, label) {
+  const clip = S.clips.find((c) => c.id === id);
+  if (!clip || !label) return null;
+  clip.label = label;
+  await store.putClip(clip);
+  updateUI();
+  return clip;
+}
+
+export async function renameItem(id, label) {
+  const item = S.timeline.find((i) => i.id === id);
+  if (!item || !label) return null;
+  item.label = label;
+  await store.putTimeline(S.timeline);
+  updateUI();
+  return item;
+}
+
 export async function removeClip(id) {
   S.clips = S.clips.filter((c) => c.id !== id);
   if (S.activeClipId === id) S.activeClipId = null;
@@ -886,12 +977,23 @@ export function sequenceShape(rows) {
   return DEFAULT_SHAPE;
 }
 
+// Rebuilt only when its contents actually change. Replacing the children on
+// every updateUI() detaches them, and a rebuild triggered by pointerdown
+// destroys the element before its own click can land.
+let trackShape = null;
+
+const trackShapeOf = () => S.timeline
+  .map((i) => `${i.id}:${(i.out - i.in).toFixed(3)}:${i.label}:${sourceById(i.sourceId)?.posterUrl ? 1 : 0}`)
+  .join(',') + `|${S.activeItemId}`;
+
 function renderTrack() {
   const rows = sequenceRows();
   const total = rows.length ? rows[rows.length - 1].end : 0;
   seqDurationEl.textContent = timecode(total);
-  seqPlayBtn.disabled = !rows.length;
   seqExportBtn.disabled = !rows.length || S.exporting;
+
+  if (trackShapeOf() === trackShape) return;
+  trackShape = trackShapeOf();
 
   track.replaceChildren(...rows.map((row) => {
     const source = sourceById(row.item.sourceId);
@@ -909,6 +1011,7 @@ function renderTrack() {
     const name = document.createElement('div');
     name.className = 'track-item-name';
     name.textContent = row.item.label;
+    renameable(name, () => row.item.label, (next) => renameItem(row.item.id, next));
     const time = document.createElement('div');
     time.className = 'track-item-time';
     time.textContent = timecode(row.duration);
@@ -984,14 +1087,13 @@ export async function selectItem(id) {
   const rows = sequenceRows();
   const row = rows.find((r) => r.item.id === id);
   if (!row) return;
+  pause();
+  stopSequence();
   S.activeItemId = id;
   S.seqPlayhead = row.start;
-  await setActive(row.item.sourceId);
-  S.in = row.item.in;
-  S.out = row.item.out;
-  S.playhead = row.item.in;
+  S.view = 'sequence';   // clicking an item means you want to watch the sequence
   updateUI();
-  await seek(row.item.in);
+  await seekSequence(row.start);
 }
 
 // Drag and drop onto the track.
@@ -1040,6 +1142,8 @@ track.addEventListener('dragleave', (event) => {
   if (!track.contains(event.relatedTarget)) clearDropMarks();
 });
 
+track.addEventListener('pointerdown', () => setView('sequence'));
+
 track.addEventListener('drop', (event) => {
   if (!event.dataTransfer.types.includes(DRAG_TYPE)) return;
   event.preventDefault();
@@ -1073,7 +1177,6 @@ export async function playSequence() {
   if (S.playingSeq || !S.timeline.length) return;
   pause();
   S.playingSeq = true;
-  seqPlayBtn.textContent = 'Stop';
 
   const rows = sequenceRows();
   const total = rows[rows.length - 1].end;
@@ -1132,7 +1235,7 @@ export async function playSequence() {
           while (S.playingSeq) {
             const at = origin + elapsed();
             S.seqPlayhead = Math.min(at, row.end);
-            seqDurationEl.textContent = `${timecode(S.seqPlayhead)} / ${timecode(total)}`;
+            updateTransport();
             if (at >= row.end) break;
             await sleep(40);
           }
@@ -1150,7 +1253,7 @@ export async function playSequence() {
             paint(sample);
             painted = true;
             S.seqPlayhead = at;
-            seqDurationEl.textContent = `${timecode(at)} / ${timecode(total)}`;
+            updateTransport();
           } finally {
             sample.close();
           }
@@ -1172,7 +1275,6 @@ export function stopSequence() {
   seqRun?.abort();
   seqRun = null;
   stopMusic();
-  seqPlayBtn.textContent = 'Play sequence';
   renderTrack();
 }
 
@@ -1200,7 +1302,6 @@ export async function exportSequence() {
   }
 }
 
-seqPlayBtn.addEventListener('click', () => (S.playingSeq ? stopSequence() : playSequence().catch(fail)));
 seqExportBtn.addEventListener('click', () => exportSequence().catch(fail));
 
 // ─── Music bed ───────────────────────────────────────────────────────────────
@@ -1421,6 +1522,7 @@ async function scrubAudio(time) {
 
 timeline.addEventListener('pointerdown', (event) => {
   if (!held) return;
+  setView('source');
   pause();
   capture(timeline, event.pointerId);
   const t = dragTime(event);
@@ -1460,7 +1562,7 @@ function bindHandle(el, which) {
 bindHandle(handleIn, 'in');
 bindHandle(handleOut, 'out');
 
-playBtn.addEventListener('click', () => (S.playing ? pause() : play().catch(fail)));
+playBtn.addEventListener('click', () => togglePlay());
 
 markInBtn.addEventListener('click', () => {
   S.in = clamp(S.playhead, 0, S.out - MIN_RANGE);
@@ -1489,7 +1591,7 @@ document.addEventListener('keydown', (event) => {
   }
   if (!held || helpOpen()) return;
   const frame = 1 / 30;
-  if (event.code === 'Space') { event.preventDefault(); S.playing ? pause() : play().catch(fail); }
+  if (event.code === 'Space') { event.preventDefault(); togglePlay(); }
   else if (event.code === 'ArrowLeft') { pause(); seek(S.playhead - (event.shiftKey ? 1 : frame)).catch(fail); }
   else if (event.code === 'ArrowRight') { pause(); seek(S.playhead + (event.shiftKey ? 1 : frame)).catch(fail); }
   else if (event.key === 'i') markInBtn.click();
@@ -1542,6 +1644,94 @@ export async function appendRange() {
   updateUI();
   await store.putTimeline(S.timeline);
   return item;
+}
+
+// ─── Which thing the viewer follows ──────────────────────────────────────────
+// There is one viewer and two things it can show. Touching the filmstrip makes
+// it the source; touching the sequence track makes it the sequence. The play
+// button drives whichever is showing, so there is never a question of what a
+// press will start.
+
+export function setView(view) {
+  if (S.view === view) return;
+  pause();
+  stopSequence();
+  S.view = view;
+  updateUI();
+  if (view === 'sequence') seekSequence(S.seqPlayhead).catch(fail);
+  else seek(S.playhead).catch(fail);
+}
+
+function updateView() {
+  const source = active();
+  const showing = S.view === 'sequence';
+  viewBadge.classList.toggle('hidden', !source && !S.timeline.length);
+  viewKind.textContent = showing ? 'Sequence' : 'Source';
+  viewName.textContent = showing
+    ? `${S.timeline.length} item${S.timeline.length === 1 ? '' : 's'}`
+    : (source?.name ?? '');
+  timeline.classList.toggle('watching', !showing);
+  sequenceEl.classList.toggle('watching', showing);
+}
+
+// Coalesced exactly like seek(): overlapping calls otherwise finish in whatever
+// order their decodes happen to complete, and the preview settles on a stale
+// frame. setView() starts one without awaiting it, so this is easy to hit.
+let pendingSeqSeek = null;
+let seekingSeq = false;
+
+/** Show a still of the sequence at a point on its own clock. */
+export async function seekSequence(time) {
+  const rows = sequenceRows();
+  const total = rows.length ? rows[rows.length - 1].end : 0;
+  S.seqPlayhead = clamp(time, 0, total);
+  updateTransport();
+
+  const shape = sequenceShape(rows);
+  // Assigning width clears the canvas even when the value is unchanged.
+  if (preview.width !== shape.width) preview.width = shape.width;
+  if (preview.height !== shape.height) preview.height = shape.height;
+
+  pendingSeqSeek = S.seqPlayhead;
+  if (seekingSeq) return;
+
+  seekingSeq = true;
+  try {
+    while (pendingSeqSeek !== null) {
+      const want = pendingSeqSeek;
+      pendingSeqSeek = null;
+
+      const row = sequence.at(rows, want);
+      if (!row) {
+        paintSilence(rows.length ? '' : 'empty sequence');
+        continue;
+      }
+      const source = sourceById(row.item.sourceId);
+      if (!media.isVideo(source)) {
+        paintSilence(row.item.label);
+        continue;
+      }
+      await media.using(source, async ({ sink }) => {
+        const sample = await sink.getSample(sequence.sourceTime(row, want));
+        if (!sample) return;
+        try {
+          paint(sample);
+        } finally {
+          sample.close();
+        }
+      });
+    }
+  } finally {
+    seekingSeq = false;
+  }
+}
+
+/** One play button for both. */
+export function togglePlay() {
+  if (S.view === 'sequence') {
+    return S.playingSeq ? stopSequence() : playSequence().catch(fail);
+  }
+  return S.playing ? pause() : play().catch(fail);
 }
 
 // ─── Help ────────────────────────────────────────────────────────────────────
@@ -1616,6 +1806,7 @@ window.addEventListener('resize', () => {
   renderMusic();
   updateRange();
   updateMark();
+  updateView();
   updateTransport();
   // Only devicePixelRatio can change what needs decoding (dragging to a
   // different-density display), and that is rare enough to settle for.
@@ -1690,6 +1881,7 @@ export function snapshot() {
     playingSeq: S.playingSeq,
     muted: S.muted,
     rate: S.rate,
+    view: S.view,
     marking: S.marking ? { at: S.marking.at } : null,
     kind: source?.kind ?? null,
     music: S.music
@@ -1715,9 +1907,11 @@ updateUI();
 Object.assign(window, {
   S, media, store, snapshot, restore,
   seek, play, pause, addSource, setActive, removeSource,
-  addClip, markClip, beginMark, cancelMark, selectClip, removeClip, exportRange, buildStrip, queueStrip, drawStrip, stripsIdle,
+  addClip, markClip, beginMark, cancelMark, selectClip, removeClip,
+  renameSource, renameClip, renameItem, exportRange, buildStrip, queueStrip, drawStrip, stripsIdle,
   sequence, render, addToSequence, removeFromSequence, moveInSequence, selectItem,
   appendRange, playSequence, stopSequence, exportSequence, sequenceShape,
+  setView, seekSequence, togglePlay,
   audio, setMusic, setMusicFromSource, removeMusic, setMusicGain, setMuted, setRate,
   timecode, parseTimecode, clamp, clipLabel, exportName, setClipRange,
 });

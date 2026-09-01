@@ -19,7 +19,7 @@ Package manager is **pnpm** (pinned in `packageManager`).
 ```bash
 pnpm install
 pnpm dev              # Vite on http://localhost:5173
-pnpm test             # the gate: 123 Playwright tests in real Chrome
+pnpm test             # the gate: 150 Playwright tests in real Chrome
 pnpm build            # production bundle into dist/
 pnpm preview          # serve that bundle
 pnpm test:report      # open the HTML report
@@ -331,6 +331,11 @@ the failure: twice now the "flaky" test was reporting a real ordering bug.
 - The fixed rows (`.bar`, `.transport`, `.timeline`, `.sequence`) are `flex:
   none`. Without it they shrink and clip their own contents once the stack gets
   tall enough, rather than the preview giving up the space.
+- `renderTrack()` rebuilds only when its contents change, for the same reason
+  `renderClips()` does: a rebuild triggered by `pointerdown` detaches the element
+  before its own `click` can land, so clicking a track item did nothing.
+- `syncClipRows()` skips a label that is being renamed, or it overwrites the
+  caret.
 
 ## Sequence playback and pre-roll
 
@@ -351,6 +356,32 @@ Sequence export re-encodes rather than passing packets through, because items
 come from different sources with different codecs, resolutions and rotations.
 Every frame is drawn into one output-sized canvas. Output takes the **first
 item's** dimensions; anything shaped differently is letterboxed.
+
+## One viewer, two things
+
+`S.view` is `'source'` or `'sequence'`, and the badge in the preview's corner
+says which. Touching the filmstrip makes it the source; touching the sequence
+track makes it the sequence; the active area gets a `watching` outline. One play
+button drives whichever is showing, so a press is never ambiguous.
+
+`seekSequence()` is **coalesced exactly like `seek()`**. `setView()` starts one
+without awaiting it, so an overlapping call is easy to produce, and without
+coalescing the two finish in whatever order their decodes complete and the
+preview settles on a stale frame. The regression test compares the painted pixel
+against the frame that point should show.
+
+Speed (`S.rate`) applies to the preview only; export always renders at 1x. Both
+clocks report elapsed *media* time already scaled by the rate, and callers
+divide by it to get wall time when sleeping.
+
+## Renaming
+
+Double-click a name: source, clip, or sequence item. Chosen over a context menu
+or a modal because there is no new surface to position, dismiss or keyboard-trap,
+and a custom context menu has to fight the browser's own.
+
+Renaming a clip does not touch a sequence item made from it, and vice versa:
+each is its own reference.
 
 ## Marking a clip
 

@@ -150,17 +150,19 @@ test('removing an item closes the gap', async ({ app }) => {
   expect(s.sequenceDuration).toBeCloseTo(4, 2);
 });
 
-test('clicking an item jumps the preview to its first frame', async ({ app }) => {
+test('clicking an item moves the sequence playhead to its start', async ({ app }) => {
   await build(app,
     { clip: 'land', in: 0, out: 2 },
     { clip: 'hd', in: 3, out: 5 });
 
   await items(app).nth(1).click();
+
+  // The viewer follows the sequence rather than jumping the source preview.
   await expect.poll(async () => {
     const s = await app.state();
-    return s.width === 1280 && Math.abs(s.playhead - 3) < 0.1;
+    return s.view === 'sequence' && Math.abs(s.seqPlayhead - 2) < 0.01;
   }).toBe(true);
-  expect((await app.state()).seqPlayhead).toBeCloseTo(2, 2);
+  expect((await app.state()).activeItemId).toBe((await app.state()).timeline[1].id);
 });
 
 test('deleting a source removes its sequence items too', async ({ app }) => {
@@ -190,13 +192,11 @@ test('the sequence survives a reload in order', async ({ app }) => {
   expect((await app.state()).sequenceDuration).toBeCloseTo(4.5, 2);
 });
 
-test('the controls stay disabled while the sequence is empty', async ({ app }) => {
+test('export stays disabled while the sequence is empty', async ({ app }) => {
   await app.add('land');
-  await expect(app.page.locator('#seqPlay')).toBeDisabled();
   await expect(app.page.locator('#seqExport')).toBeDisabled();
 
   await app.page.evaluate(() => { window.S.in = 0; window.S.out = 1; return window.appendRange(); });
-  await expect(app.page.locator('#seqPlay')).toBeEnabled();
   await expect(app.page.locator('#seqExport')).toBeEnabled();
 });
 

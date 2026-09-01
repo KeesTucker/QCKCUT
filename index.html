@@ -31,6 +31,7 @@
 
   <section id="stage" class="stage">
     <canvas id="preview"></canvas>
+    <div id="viewBadge" class="badge hidden"><span id="viewKind">Source</span><span id="viewName"></span></div>
 
     <div id="controls" class="controls hidden">
       <button id="playBtn" class="ctl" data-state="paused" aria-label="Play" title="Play or pause (Space)" disabled>
@@ -105,7 +106,6 @@
       <input id="musicGain" type="range" min="0" max="1" step="0.01" value="0.35" aria-label="Music level">
       <button id="musicDrop" class="ghost" title="Remove the music bed">&#10005;</button>
     </label>
-    <button id="seqPlay" disabled>Play sequence</button>
     <button id="seqExport" disabled>Export sequence</button>
   </div>
   <div class="track-wrap">
@@ -142,6 +142,17 @@
         nothing and deletes nothing. Click a clip to select it and type exact times into the
         boxes that appear, or drag the handles on the filmstrip. Every clip on the current source
         shows as a band along the bottom of the filmstrip.</p>
+        <p>Double-click any name to rename it: a source, a clip, or an item on the sequence.
+        <kbd>Enter</kbd> keeps it, <kbd>Esc</kbd> puts it back.</p>
+      </section>
+
+      <section>
+        <h4>Source and sequence</h4>
+        <p>One viewer shows one of two things, and the badge in its corner says
+        which. Touch the filmstrip and it shows the source; touch the sequence
+        track and it shows the sequence. Whichever is showing is what the play
+        button plays, and the active area is outlined so you can see at a glance
+        where you are.</p>
       </section>
 
       <section>
@@ -149,9 +160,9 @@
         <p>Drag clips or whole sources onto the Sequence track to assemble them,
         and drag them within the track to reorder. Position comes from order, so
         there are never gaps to tidy up. Clicking an item jumps the preview to
-        its first frame. <kbd>Play sequence</kbd> plays the whole thing across
-        the cuts, and <kbd>Export sequence</kbd> renders it to one MP4 at the
-        first item's dimensions, letterboxing anything shaped differently.</p>
+        its first frame and switches the viewer to it. <kbd>Export sequence</kbd>
+        renders the whole thing to one MP4 at the first item's dimensions,
+        letterboxing anything shaped differently.</p>
       </section>
 
       <section>
