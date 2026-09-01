@@ -404,3 +404,115 @@ kbd {
   font: 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
   text-align: center;
 }
+
+/* Sequence track */
+.sequence {
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.sequence-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+}
+.sequence-head h2 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.sequence-head button { padding: 4px 12px; }
+
+.track-wrap { position: relative; }
+
+.track {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  height: 64px;
+  margin: 0;
+  padding: 0 14px 12px;
+  list-style: none;
+}
+
+/* The hint overlays the track rather than replacing it, so an empty track is
+   still a drop target. */
+.sequence .empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  align-items: center;
+  padding: 0 16px 12px;
+  text-align: left;
+  pointer-events: none;
+}
+.track:not(:empty) + .empty { display: none; }
+
+/* Width is proportional to duration, so the track reads as a timeline even
+   though position is stored as order. */
+.track-item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-width: 34px;
+  padding: 5px 7px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #1d2027 center/cover no-repeat;
+  cursor: grab;
+  user-select: none;
+}
+.track-item::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(14, 15, 18, .25), rgba(14, 15, 18, .82));
+}
+.track-item > * { position: relative; }
+.track-item:hover { border-color: #3d424e; }
+.track-item.active { border-color: var(--accent); }
+.track-item.dragging { opacity: .4; }
+
+.track-item-name {
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.track-item-time {
+  color: var(--dim);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.track-item-drop {
+  position: absolute;
+  top: 2px;
+  right: 3px;
+  padding: 0 4px;
+  border: none;
+  border-radius: 4px;
+  background: rgba(14, 15, 18, .75);
+  color: var(--dim);
+  font: inherit;
+  cursor: pointer;
+  opacity: 0;
+}
+.track-item:hover .track-item-drop { opacity: 1; }
+.track-item-drop:hover { color: var(--accent); }
+
+/* Insertion marker, drawn as an edge on the item the drop would land before */
+.track-item.drop-before { box-shadow: inset 3px 0 0 var(--accent); }
+.track-item.drop-after { box-shadow: inset -3px 0 0 var(--accent); }
+
+.track.over { outline: 1px dashed var(--accent); outline-offset: -4px; }
+
+/* Rows in the side panels are draggable onto the track */
+.item[draggable="true"] { cursor: grab; }

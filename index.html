@@ -65,6 +65,20 @@
   <div id="playheadEl" class="playhead"></div>
 </section>
 
+<section class="sequence">
+  <div class="sequence-head">
+    <h2>Sequence</h2>
+    <span id="seqDuration" class="time">0:00.00</span>
+    <span class="spacer"></span>
+    <button id="seqPlay" disabled>Play sequence</button>
+    <button id="seqExport" disabled>Export sequence</button>
+  </div>
+  <div class="track-wrap">
+    <ol id="track" class="track"></ol>
+    <p id="trackEmpty" class="empty">Drag clips or sources here to build a sequence</p>
+  </div>
+</section>
+
 <div class="help-overlay" id="helpOverlay">
   <div class="help-box" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
     <div class="help-head">
@@ -91,6 +105,16 @@
       </section>
 
       <section>
+        <h4>Sequence</h4>
+        <p>Drag clips or whole sources onto the Sequence track to assemble them,
+        and drag them within the track to reorder. Position comes from order, so
+        there are never gaps to tidy up. Clicking an item jumps the preview to
+        its first frame. <kbd>Play sequence</kbd> plays the whole thing across
+        the cuts, and <kbd>Export sequence</kbd> renders it to one MP4 at the
+        first item's dimensions, letterboxing anything shaped differently.</p>
+      </section>
+
+      <section>
         <h4>Export</h4>
         <p><kbd>Export</kbd> renders the current range to an MP4 and downloads it, keeping the
         audio. Encoding runs on your GPU, so it is usually several times faster than the clip
@@ -106,6 +130,7 @@
           <tr><td><kbd>I</kbd></td><td>Mark in at the playhead</td></tr>
           <tr><td><kbd>O</kbd></td><td>Mark out at the playhead</td></tr>
           <tr><td><kbd>C</kbd></td><td>Make a clip from the current range</td></tr>
+          <tr><td><kbd>T</kbd></td><td>Append the current range to the sequence</td></tr>
           <tr><td><kbd>?</kbd></td><td>Open this help</td></tr>
           <tr><td><kbd>Esc</kbd></td><td>Close this help</td></tr>
         </table>

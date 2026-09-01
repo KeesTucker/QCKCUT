@@ -31,7 +31,7 @@ test('every documented key is one the app actually handles', async ({ app }) => 
   await app.page.locator('#helpBtn').click();
   const keys = await app.page.locator('.keys kbd').allTextContents();
   // Guards against the help drifting out of date as bindings change.
-  expect(keys).toEqual(['Space', '←', '→', 'Shift', '←', '→', 'I', 'O', 'C', '?', 'Esc']);
+  expect(keys).toEqual(['Space', '←', '→', 'Shift', '←', '→', 'I', 'O', 'C', 'T', '?', 'Esc']);
 });
 
 test('shortcuts do not fire while help is open', async ({ app }) => {

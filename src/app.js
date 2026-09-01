@@ -1,5 +1,6 @@
-import { BufferTarget, Conversion, Input, Mp4OutputFormat, Output, ALL_FORMATS, BlobSource } from 'mediabunny';
 import * as media from './media.js';
+import * as render from './render.js';
+import * as sequence from './sequence.js';
 import * as store from './store.js';
 
 // ─── State ───────────────────────────────────────────────────────────────────
@@ -12,8 +13,12 @@ import * as store from './store.js';
 const S = {
   sources: [],      // { id, name, blob, duration, width, height, codec, thumbs, thumbCount, poster }
   clips: [],         // { id, sourceId, in, out, label }
+  timeline: [],     // { id, sourceId, in, out, label } — order is the timing
   activeId: null,
   activeClipId: null,
+  activeItemId: null,
+  seqPlayhead: 0,
+  playingSeq: false,
   playhead: 0,
   in: 0,
   out: 0,
@@ -26,6 +31,8 @@ const MIN_RANGE = 0.05;   // shortest selection we allow, seconds
 const active = () => S.sources.find((s) => s.id === S.activeId) ?? null;
 const sourceOf = (clip) => S.sources.find((s) => s.id === clip.sourceId) ?? null;
 const clipsFor = (sourceId) => S.clips.filter((c) => c.sourceId === sourceId);
+const sourceById = (id) => S.sources.find((s) => s.id === id) ?? null;
+const sequenceRows = () => sequence.layout(S.timeline);
 
 let nextId = 1;
 const mintId = (prefix) => `${prefix}${nextId++}`;
@@ -52,6 +59,10 @@ const addClipBtn = $('addClip');
 const addSourceBtn = $('addSource');
 const sourceList = $('sourceList');
 const clipList = $('clipList');
+const track = $('track');
+const seqPlayBtn = $('seqPlay');
+const seqExportBtn = $('seqExport');
+const seqDurationEl = $('seqDuration');
 const fileNameEl = $('fileName');
 const statusEl = $('status');
 const timeEl = $('time');
@@ -104,6 +115,8 @@ export function exportName(source, clip) {
 let held = null;   // the acquired decoder entry for the active source
 
 function paint(sample) {
+  pctx.fillStyle = '#000';
+  pctx.fillRect(0, 0, preview.width, preview.height);
   sample.drawWithFit(pctx, { fit: 'contain' });
 }
 
@@ -224,7 +237,10 @@ export async function buildStrip(source) {
     for await (const tile of media.tiles(source, source.thumbCount, run.signal)) {
       if (run.signal.aborted) return;
       source.thumbs.push(tile);
-      source.poster ??= tile;
+      if (!source.poster && tile) {
+        source.poster = tile;
+        source.posterUrl = tile.toDataURL();
+      }
       if (source.id === S.activeId) drawStrip();
       if (source.thumbs.length === 1) renderSources();
     }
@@ -307,6 +323,7 @@ function renderSources() {
       meta: `${timecode(source.duration)} · ${source.width}×${source.height}`,
       onSelect: () => setActive(source.id).catch(fail),
       onDrop: () => removeSource(source.id).catch(fail),
+      drag: { kind: 'source', id: source.id },
     });
     const poster = document.createElement('canvas');
     poster.width = 56;
@@ -343,6 +360,7 @@ function renderClips() {
       meta: clipMeta(clip, source),
       onSelect: () => selectClip(clip.id).catch(fail),
       onDrop: () => removeClip(clip.id).catch(fail),
+      drag: { kind: 'clip', id: clip.id },
     });
     const swatch = document.createElement('span');
     swatch.className = 'swatch';
@@ -468,7 +486,7 @@ export async function setClipRange(id, start, end) {
   return clip;
 }
 
-function row({ active: isActive, name, meta, onSelect, onDrop }) {
+function row({ active: isActive, name, meta, onSelect, onDrop, drag }) {
   const item = document.createElement('div');
   item.className = `item${isActive ? ' active' : ''}`;
   item.tabIndex = 0;
@@ -491,6 +509,14 @@ function row({ active: isActive, name, meta, onSelect, onDrop }) {
     event.stopPropagation();
     onDrop();
   });
+
+  if (drag) {
+    item.draggable = true;
+    item.addEventListener('dragstart', (event) => {
+      event.dataTransfer.setData(DRAG_TYPE, JSON.stringify(drag));
+      event.dataTransfer.effectAllowed = 'copy';
+    });
+  }
 
   item.append(text, remove);
   item.addEventListener('click', onSelect);
@@ -516,6 +542,7 @@ function updateUI() {
     : 'no clip';
   renderSources();
   renderClips();
+  renderTrack();
   updateRange();
   updateTransport();
   drawStrip();
@@ -525,7 +552,7 @@ function updateUI() {
 
 export async function addSource(file) {
   setStatus(`reading ${file.name}…`);
-  const source = { id: mintId('s'), name: file.name, blob: file, thumbs: [], thumbCount: 0, poster: null };
+  const source = { id: mintId('s'), name: file.name, blob: file, thumbs: [], thumbCount: 0, poster: null, posterUrl: null };
   Object.assign(source, await media.probe(source));
   S.sources.push(source);
   await store.putSource(source);
@@ -562,9 +589,15 @@ export async function setActive(id) {
 }
 
 export async function removeSource(id) {
-  // Clips referencing this source go with it; nothing else points at a source.
+  // Clips and sequence items referencing this source go with it; nothing else
+  // points at a source.
   for (const clip of clipsFor(id)) await store.dropClip(clip.id);
   S.clips = S.clips.filter((c) => c.sourceId !== id);
+  if (S.timeline.some((item) => item.sourceId === id)) {
+    S.timeline = S.timeline.filter((item) => item.sourceId !== id);
+    S.seqPlayhead = 0;
+    await store.putTimeline(S.timeline);
+  }
 
   if (S.activeId === id) {
     if (held) media.release(id);
@@ -629,6 +662,287 @@ async function syncActiveClip() {
   await store.putClip(clip);
   renderClips();
 }
+
+// ─── Sequence ────────────────────────────────────────────────────────────────
+// The track holds items in order; an item's position on the sequence clock is
+// derived from the items before it, never stored. Reordering is a splice, and
+// trimming or deleting ripples for free.
+
+const DRAG_TYPE = 'application/x-qckcut';
+
+function renderTrack() {
+  const rows = sequenceRows();
+  const total = rows.length ? rows[rows.length - 1].end : 0;
+  seqDurationEl.textContent = timecode(total);
+  seqPlayBtn.disabled = !rows.length;
+  seqExportBtn.disabled = !rows.length || S.exporting;
+
+  track.replaceChildren(...rows.map((row) => {
+    const source = sourceById(row.item.sourceId);
+    const el = document.createElement('li');
+    el.className = `track-item${row.item.id === S.activeItemId ? ' active' : ''}`;
+    el.dataset.id = row.item.id;
+    el.dataset.index = String(row.index);
+    // Width tracks duration so the track reads as a timeline, with a floor so
+    // a very short item stays clickable.
+    el.style.flex = `${Math.max(row.duration, 0.01)} 1 0`;
+    el.draggable = true;
+    if (source?.posterUrl) el.style.backgroundImage = `url(${source.posterUrl})`;
+
+    const name = document.createElement('div');
+    name.className = 'track-item-name';
+    name.textContent = row.item.label;
+    const time = document.createElement('div');
+    time.className = 'track-item-time';
+    time.textContent = timecode(row.duration);
+
+    const drop = document.createElement('button');
+    drop.className = 'track-item-drop';
+    drop.textContent = '\u00d7';
+    drop.title = 'Remove from sequence';
+    drop.addEventListener('click', (event) => {
+      event.stopPropagation();
+      removeFromSequence(row.item.id).catch(fail);
+    });
+
+    el.append(name, time, drop);
+    el.addEventListener('click', () => selectItem(row.item.id).catch(fail));
+    el.addEventListener('dragstart', (event) => {
+      event.dataTransfer.setData(DRAG_TYPE, JSON.stringify({ kind: 'item', index: row.index }));
+      event.dataTransfer.effectAllowed = 'move';
+      el.classList.add('dragging');
+    });
+    el.addEventListener('dragend', () => {
+      el.classList.remove('dragging');
+      clearDropMarks();
+    });
+    return el;
+  }));
+}
+
+/** Build a timeline item from a clip, or from a whole source. */
+function itemFrom(kind, id) {
+  if (kind === 'clip') {
+    const clip = S.clips.find((c) => c.id === id);
+    if (!clip) return null;
+    return { id: mintId('t'), sourceId: clip.sourceId, in: clip.in, out: clip.out, label: clip.label };
+  }
+  const source = sourceById(id);
+  if (!source) return null;
+  return {
+    id: mintId('t'),
+    sourceId: source.id,
+    in: 0,
+    out: source.duration,
+    label: source.name.replace(/\.[^.]+$/, ''),
+  };
+}
+
+export async function addToSequence(kind, id, index = S.timeline.length) {
+  const item = itemFrom(kind, id);
+  if (!item) return null;
+  S.timeline = sequence.insert(S.timeline, item, index);
+  S.activeItemId = item.id;
+  updateUI();
+  await store.putTimeline(S.timeline);
+  return item;
+}
+
+export async function removeFromSequence(id) {
+  S.timeline = sequence.remove(S.timeline, id);
+  if (S.activeItemId === id) S.activeItemId = null;
+  S.seqPlayhead = 0;
+  updateUI();
+  await store.putTimeline(S.timeline);
+}
+
+export async function moveInSequence(from, to) {
+  S.timeline = sequence.move(S.timeline, from, to);
+  updateUI();
+  await store.putTimeline(S.timeline);
+}
+
+/** Jump the preview to a sequence item's first frame. */
+export async function selectItem(id) {
+  const rows = sequenceRows();
+  const row = rows.find((r) => r.item.id === id);
+  if (!row) return;
+  S.activeItemId = id;
+  S.seqPlayhead = row.start;
+  await setActive(row.item.sourceId);
+  S.in = row.item.in;
+  S.out = row.item.out;
+  S.playhead = row.item.in;
+  updateUI();
+  await seek(row.item.in);
+}
+
+// Drag and drop onto the track.
+
+const dropPayload = (event) => {
+  try {
+    return JSON.parse(event.dataTransfer.getData(DRAG_TYPE));
+  } catch {
+    return null;
+  }
+};
+
+function clearDropMarks() {
+  track.classList.remove('over');
+  for (const el of track.children) el.classList.remove('drop-before', 'drop-after');
+}
+
+/** Which insertion slot the pointer is over, 0..length. */
+function slotFor(event) {
+  const bounds = [...track.children].map((el) => {
+    const r = el.getBoundingClientRect();
+    return { left: r.left, right: r.right };
+  });
+  return sequence.slotAt(bounds, event.clientX);
+}
+
+function markSlot(slot) {
+  const children = [...track.children];
+  for (const el of children) el.classList.remove('drop-before', 'drop-after');
+  if (!children.length) return;
+  if (slot >= children.length) children[children.length - 1].classList.add('drop-after');
+  else children[slot].classList.add('drop-before');
+}
+
+for (const type of ['dragenter', 'dragover']) {
+  track.addEventListener(type, (event) => {
+    if (!event.dataTransfer.types.includes(DRAG_TYPE)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    track.classList.add('over');
+    markSlot(slotFor(event));
+  });
+}
+
+track.addEventListener('dragleave', (event) => {
+  if (!track.contains(event.relatedTarget)) clearDropMarks();
+});
+
+track.addEventListener('drop', (event) => {
+  if (!event.dataTransfer.types.includes(DRAG_TYPE)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const slot = slotFor(event);
+  const payload = dropPayload(event);
+  clearDropMarks();
+  if (!payload) return;
+  if (payload.kind === 'item') moveInSequence(payload.index, slot).catch(fail);
+  else addToSequence(payload.kind, payload.id, slot).catch(fail);
+});
+
+// Playback across the whole sequence.
+
+/**
+ * Open the next item's decoder while the current one plays, then hand it
+ * straight back. The LRU keeps it open, so the acquire at the cut is instant
+ * and its first keyframe is already decoded. Without this every cut stalls for
+ * the length of a keyframe hunt.
+ */
+function preroll(row) {
+  const source = row && sourceById(row.item.sourceId);
+  if (!source) return;
+  media.using(source, async ({ sink }) => {
+    const sample = await sink.getSample(row.item.in);
+    sample?.close();
+  }).catch(() => {});
+}
+
+export async function playSequence() {
+  if (S.playingSeq || !S.timeline.length) return;
+  pause();
+  S.playingSeq = true;
+  seqPlayBtn.textContent = 'Stop';
+
+  const rows = sequenceRows();
+  const total = rows[rows.length - 1].end;
+  if (S.seqPlayhead >= total - 0.02) S.seqPlayhead = 0;
+
+  // The preview takes the sequence's own dimensions; items shaped differently
+  // are letterboxed into it, matching what export produces.
+  const first = sourceById(rows[0].item.sourceId);
+  if (first) {
+    preview.width = first.width;
+    preview.height = first.height;
+  }
+
+  const origin = S.seqPlayhead;
+  const startedAt = performance.now();
+  let painted = false;
+
+  try {
+    for (const [i, row] of rows.entries()) {
+      if (!S.playingSeq) break;
+      if (row.end <= origin) continue;
+      const source = sourceById(row.item.sourceId);
+      if (!source) continue;
+
+      const entry = await media.acquire(source);
+      preroll(rows[i + 1]);
+      const from = sequence.sourceTime(row, Math.max(origin, row.start));
+
+      try {
+        for await (const sample of entry.sink.samples(from, row.item.out)) {
+          try {
+            if (!S.playingSeq) break;
+            const at = row.start + (sample.timestamp - row.item.in);
+            const wait = (at - origin) * 1000 - (performance.now() - startedAt);
+            if (wait < -50 && painted) continue;
+            if (wait > 0) await sleep(wait);
+            if (!S.playingSeq) break;
+            paint(sample);
+            painted = true;
+            S.seqPlayhead = at;
+            seqDurationEl.textContent = `${timecode(at)} / ${timecode(total)}`;
+          } finally {
+            sample.close();
+          }
+        }
+      } finally {
+        media.release(source.id);
+      }
+    }
+  } finally {
+    if (S.playingSeq) S.seqPlayhead = total;
+    stopSequence();
+  }
+}
+
+export function stopSequence() {
+  S.playingSeq = false;
+  seqPlayBtn.textContent = 'Play sequence';
+  renderTrack();
+}
+
+export async function exportSequence() {
+  if (S.exporting || !S.timeline.length) return null;
+  S.exporting = true;
+  stopSequence();
+  pause();
+  seqExportBtn.disabled = true;
+
+  try {
+    const rows = sequenceRows();
+    const started = performance.now();
+    const blob = await render.renderSequence(rows, (item) => sourceById(item.sourceId),
+      (p) => setStatus(`rendering sequence ${Math.round(p * 100)}%`));
+    const took = (performance.now() - started) / 1000;
+    render.download(blob, 'sequence.mp4');
+    const total = rows[rows.length - 1].end;
+    setStatus(`rendered ${(blob.size / 1e6).toFixed(1)} MB in ${took.toFixed(1)}s (${(total / took).toFixed(1)}\u00d7)`);
+    return blob;
+  } finally {
+    S.exporting = false;
+    renderTrack();
+  }
+}
+
+seqPlayBtn.addEventListener('click', () => (S.playingSeq ? stopSequence() : playSequence().catch(fail)));
+seqExportBtn.addEventListener('click', () => exportSequence().catch(fail));
 
 // ─── Timeline interaction ────────────────────────────────────────────────────
 // The whole strip is one scrub surface. Handles capture the pointer first, so
@@ -704,6 +1018,7 @@ document.addEventListener('keydown', (event) => {
   else if (event.key === 'i') markInBtn.click();
   else if (event.key === 'o') markOutBtn.click();
   else if (event.key === 'c') addClip().catch(fail);
+  else if (event.key === 't') appendRange().catch(fail);
 });
 
 // ─── Export ──────────────────────────────────────────────────────────────────
@@ -712,40 +1027,45 @@ document.addEventListener('keydown', (event) => {
 
 export async function exportRange() {
   const source = active();
-  if (S.exporting || !source) return;
+  if (S.exporting || !source) return null;
   S.exporting = true;
   pause();
+  stopSequence();
   exportBtn.disabled = true;
 
-  let input = null;
   try {
-    input = new Input({ source: new BlobSource(source.blob), formats: ALL_FORMATS });
-    const output = new Output({ format: new Mp4OutputFormat(), target: new BufferTarget() });
-    const conversion = await Conversion.init({ input, output, trim: { start: S.in, end: S.out } });
-    conversion.onProgress = (p) => setStatus(`exporting ${Math.round(p * 100)}%`);
-
     const started = performance.now();
-    await conversion.execute();
+    const blob = await render.renderClip(source, S.in, S.out,
+      (p) => setStatus(`exporting ${Math.round(p * 100)}%`));
     const took = (performance.now() - started) / 1000;
-
-    const blob = new Blob([output.target.buffer], { type: 'video/mp4' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = exportName(source, S.clips.find((c) => c.id === S.activeClipId));
-    a.click();
-    // Revoking synchronously after click() races the download in some browsers.
-    setTimeout(() => URL.revokeObjectURL(url), 60_000);
-
-    setStatus(`exported ${(blob.size / 1e6).toFixed(1)} MB in ${took.toFixed(1)}s (${((S.out - S.in) / took).toFixed(1)}×)`);
+    render.download(blob, exportName(source, S.clips.find((c) => c.id === S.activeClipId)));
+    setStatus(`exported ${(blob.size / 1e6).toFixed(1)} MB in ${took.toFixed(1)}s (${((S.out - S.in) / took).toFixed(1)}\u00d7)`);
+    return blob;
   } finally {
-    input?.dispose();
     S.exporting = false;
     exportBtn.disabled = false;
   }
 }
 
 exportBtn.addEventListener('click', () => exportRange().catch(fail));
+
+/** Append the current in/out of the active source straight to the sequence. */
+export async function appendRange() {
+  const source = active();
+  if (!source || S.out - S.in < MIN_RANGE) return null;
+  const item = {
+    id: mintId('t'),
+    sourceId: source.id,
+    in: S.in,
+    out: S.out,
+    label: clipLabel(source.name, S.timeline.filter((i) => i.sourceId === source.id).length),
+  };
+  S.timeline = sequence.insert(S.timeline, item, S.timeline.length);
+  S.activeItemId = item.id;
+  updateUI();
+  await store.putTimeline(S.timeline);
+  return item;
+}
 
 // ─── Help ────────────────────────────────────────────────────────────────────
 
@@ -797,10 +1117,11 @@ document.addEventListener('dragleave', (event) => {
 });
 
 document.addEventListener('drop', (event) => {
-  event.preventDefault();
   drop.classList.remove('over');
   const files = [...(event.dataTransfer?.files ?? [])];
-  if (files.length) addFiles(files).catch(fail);
+  if (!files.length) return;   // not ours; leave the browser to its default
+  event.preventDefault();
+  addFiles(files).catch(fail);
 });
 
 drop.addEventListener('click', pickFiles);
@@ -818,12 +1139,16 @@ window.addEventListener('resize', () => {
 
 /** Restore the project from IndexedDB. */
 export async function restore() {
-  const [sources, clips] = await Promise.all([store.allSources(), store.allClips()]);
+  const [sources, clips, timeline] = await Promise.all([
+    store.allSources(), store.allClips(), store.allTimeline(),
+  ]);
   if (!sources.length) return;
-  S.sources = sources.map((s) => ({ ...s, thumbs: [], thumbCount: 0, poster: null }));
-  S.clips = clips.filter((c) => sources.some((s) => s.id === c.sourceId));
+  const known = (id) => sources.some((s) => s.id === id);
+  S.sources = sources.map((s) => ({ ...s, thumbs: [], thumbCount: 0, poster: null, posterUrl: null }));
+  S.clips = clips.filter((c) => known(c.sourceId));
+  S.timeline = timeline.filter((i) => known(i.sourceId));
   // Ids are minted from a counter, so continue past whatever was restored.
-  nextId = Math.max(0, ...[...S.sources, ...S.clips]
+  nextId = Math.max(0, ...[...S.sources, ...S.clips, ...S.timeline]
     .map((r) => Number(String(r.id).slice(1)) || 0)) + 1;
   await setActive(S.sources[0].id);
   for (const source of S.sources) queueStrip(source);
@@ -835,8 +1160,14 @@ export function snapshot() {
   return {
     sources: S.sources.map((s) => ({ id: s.id, name: s.name, duration: s.duration, width: s.width, height: s.height, thumbCount: s.thumbCount, thumbsDecoded: s.thumbs.filter(Boolean).length })),
     clips: S.clips.map((c) => ({ ...c })),
+    timeline: sequenceRows().map(({ item, index, start, duration, end }) =>
+      ({ ...item, index, start, duration, end })),
+    sequenceDuration: sequence.totalDuration(S.timeline),
     activeId: S.activeId,
     activeClipId: S.activeClipId,
+    activeItemId: S.activeItemId,
+    seqPlayhead: S.seqPlayhead,
+    playingSeq: S.playingSeq,
     playhead: S.playhead,
     in: S.in,
     out: S.out,
@@ -856,6 +1187,8 @@ Object.assign(window, {
   S, media, store, snapshot, restore,
   seek, play, pause, addSource, setActive, removeSource,
   addClip, selectClip, removeClip, exportRange, buildStrip, queueStrip, drawStrip, stripsIdle,
+  sequence, render, addToSequence, removeFromSequence, moveInSequence, selectItem,
+  appendRange, playSequence, stopSequence, exportSequence,
   timecode, parseTimecode, clamp, clipLabel, exportName, setClipRange,
 });
 

@@ -3,7 +3,7 @@
 // a no-build dev loop bearable: a save does not cost you a re-import.
 
 const NAME = 'qckcut';
-const VERSION = 2;   // v2 renamed the 'clips' store from 'cuts'
+const VERSION = 3;   // v2 renamed 'cuts' to 'clips'; v3 added 'timeline'
 let handle = null;
 
 function db() {
@@ -11,7 +11,7 @@ function db() {
     const request = indexedDB.open(NAME, VERSION);
     request.onupgradeneeded = () => {
       const d = request.result;
-      for (const store of ['sources', 'clips']) {
+      for (const store of ['sources', 'clips', 'timeline']) {
         if (!d.objectStoreNames.contains(store)) d.createObjectStore(store, { keyPath: 'id' });
       }
       if (d.objectStoreNames.contains('cuts')) d.deleteObjectStore('cuts');
@@ -51,7 +51,22 @@ export const putClip = (clip) => run('clips', 'readwrite', (s) => s.put(clip));
 export const dropClip = (id) => run('clips', 'readwrite', (s) => s.delete(id));
 export const allClips = () => run('clips', 'readonly', (s) => s.getAll());
 
+// The sequence is stored whole rather than per item: its order *is* its
+// timing, so a partial write would be a reordered sequence.
+export async function putTimeline(items) {
+  await run('timeline', 'readwrite', (s) => s.clear());
+  for (const [index, item] of items.entries()) {
+    await run('timeline', 'readwrite', (s) => s.put({ ...item, index }));
+  }
+}
+
+export async function allTimeline() {
+  const rows = await run('timeline', 'readonly', (s) => s.getAll());
+  return rows.sort((a, b) => a.index - b.index).map(({ index, ...item }) => item);
+}
+
 export async function clearAll() {
-  await run('sources', 'readwrite', (s) => s.clear());
-  await run('clips', 'readwrite', (s) => s.clear());
+  for (const store of ['sources', 'clips', 'timeline']) {
+    await run(store, 'readwrite', (s) => s.clear());
+  }
 }

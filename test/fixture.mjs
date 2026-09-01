@@ -1,10 +1,10 @@
 // Generates a synthetic test clip in the browser, so the repo carries no binary
 // fixture and the test suite needs no ffmpeg.
 import {
-  CanvasSource, Output, Mp4OutputFormat, BufferTarget, QUALITY_LOW,
+  AudioBufferSource, BufferTarget, CanvasSource, Mp4OutputFormat, Output, QUALITY_LOW,
 } from 'mediabunny';
 
-export async function makeClip({ seconds = 6, fps = 30, width = 640, height = 360, keyFrameInterval = 1 } = {}) {
+export async function makeClip({ seconds = 6, fps = 30, width = 640, height = 360, keyFrameInterval = 1, tone = 0 } = {}) {
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
@@ -17,7 +17,23 @@ export async function makeClip({ seconds = 6, fps = 30, width = 640, height = 36
     keyFrameInterval,
   });
   output.addVideoTrack(source, { frameRate: fps });
+
+  // An optional sine tone, so sequence export has real audio to concatenate.
+  const audio = tone ? new AudioBufferSource({ codec: 'aac', bitrate: QUALITY_LOW }) : null;
+  if (audio) output.addAudioTrack(audio);
+
   await output.start();
+
+  if (audio) {
+    const rate = 48_000;
+    const buffer = new AudioBuffer({ numberOfChannels: 1, length: seconds * rate, sampleRate: rate });
+    const channel = buffer.getChannelData(0);
+    for (let i = 0; i < channel.length; i++) {
+      channel[i] = 0.25 * Math.sin((2 * Math.PI * tone * i) / rate);
+    }
+    await audio.add(buffer);
+    audio.close();
+  }
 
   const total = seconds * fps;
   for (let i = 0; i < total; i++) {
@@ -34,6 +50,7 @@ export async function makeClip({ seconds = 6, fps = 30, width = 640, height = 36
     await source.add(t, 1 / fps);
   }
 
+  source.close();
   await output.finalize();
   return new File([output.target.buffer], 'fixture.mp4', { type: 'video/mp4' });
 }

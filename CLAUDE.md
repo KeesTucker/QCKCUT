@@ -19,7 +19,7 @@ Package manager is **pnpm** (pinned in `packageManager`).
 ```bash
 pnpm install
 pnpm dev              # Vite on http://localhost:5173
-pnpm test             # the gate: 57 Playwright tests in real Chrome
+pnpm test             # the gate: 87 Playwright tests in real Chrome
 pnpm build            # production bundle into dist/
 pnpm preview          # serve that bundle
 pnpm test:report      # open the HTML report
@@ -41,7 +41,7 @@ there is no browser download after `pnpm install`.
 ```
 index.html              Vite entry. Stays at the root; that is the convention.
 vite.config.js
-src/                    app.js, media.js, store.js, styles.css
+src/                    app.js, media.js, render.js, sequence.js, store.js, styles.css
 test/
   fixture.mjs           encodes a synthetic clip in the browser
   mediabunny.mjs        re-export, see below
@@ -75,10 +75,12 @@ Two things follow from Vite that are easy to trip over:
 
 ## Architecture
 
-### Three modules
+### Five modules
 
 - `store.js` — IndexedDB. Sources hold blobs, which localStorage cannot take.
 - `media.js` — opening media, the decoder pool, filmstrip tile decoding.
+- `sequence.js` — the timeline model. Pure and DOM-free, so it unit-tests cleanly.
+- `render.js` — turning a range or a sequence into an MP4.
 - `app.js` — state, rendering, and all DOM wiring.
 
 `app.js` keeps QCKSCRL's shape: one mutable `S`, mutated and then followed by an
@@ -99,6 +101,20 @@ lands, which will add only a `start` field for its position on the timeline.
 
 `sourceOf(clip)` and `clipsFor(sourceId)` are the only ways to cross the
 reference. Never denormalise source data onto a clip.
+
+### The sequence stores order, not times
+
+```js
+S.timeline = [{ id, sourceId, in, out, label }]   // position IS the index
+```
+
+An item's start is the sum of the durations before it, computed by
+`sequence.layout()` on demand. Nothing stores a start time. That removes gaps,
+overlaps and the ripple pass after every trim: reordering is a splice, and
+deleting closes the gap because there was never a gap to begin with.
+
+`sequence.move(items, from, to)` takes `to` as an index into the array *before*
+the move, which is what a drop position naturally gives you.
 
 ## Invariants that will bite you
 
@@ -174,6 +190,22 @@ selection has not, and that window is observable from outside.
 The same shape of bug appears in tests: most UI actions start an async chain and
 their intermediate states are visible. See "Async races in specs" below.
 
+### Sequence export must not drift
+
+`sink.samples(in, out)` also yields the frame that *spans* `out`. Letting its
+full duration through pushes each item past its boundary, and the error
+accumulates across every cut.
+
+Worse, the audio mix is laid out on exact item boundaries while the picture is
+frame-quantised, so clamping alone still lets the two drift apart by up to a
+frame per cut. `render.js` therefore iterates frames by hand with one-frame
+lookahead: a frame's duration is the gap to its successor, and an item's last
+frame is held until exactly the cut.
+
+Note that the *container* duration can still exceed the video by ~75ms when
+audio is present: AAC pads to whole 1024-sample frames and adds encoder priming.
+Assert on the video track's duration when you want an exact number.
+
 ### IndexedDB writes resolve on the transaction
 
 `request.onsuccess` fires *before* the transaction commits. Resolving there and
@@ -244,10 +276,28 @@ the failure: twice now the "flaky" test was reporting a real ordering bug.
 - `row()` returns `{ el, name, meta }`, not an element, so callers can update the
   text nodes in place instead of rebuilding the row.
 
+## Sequence playback and pre-roll
+
+Playback walks the rows, holding one decoder at a time and firing `preroll()` at
+the next item's source before the cut. Pre-roll acquires, decodes the first
+keyframe, and releases immediately: the LRU keeps the entry open, so the acquire
+at the cut is instant.
+
+**Be honest about what pre-roll buys here.** On these fixtures (tens of kB,
+2-second GOP) opening a source cold costs about 6ms, and the worst measured seam
+was identical with pre-roll disabled. It is a bet on real footage, where parsing
+a large moov and hunting a keyframe are far more expensive. The test therefore
+asserts the *mechanism* (the next source is open well before the cut) rather
+than a duration, because a duration assertion passes either way and proves
+nothing.
+
+Sequence export re-encodes rather than passing packets through, because items
+come from different sources with different codecs, resolutions and rotations.
+Every frame is drawn into one output-sized canvas. Output takes the **first
+item's** dimensions; anything shaped differently is letterboxed.
+
 ## Not built yet
 
-Sequencing. Clips cannot yet be dragged onto a timeline and played back as a
-sequence. The hard part there is decoder pre-roll: without opening the next
-clip's decoder before the boundary, playback stalls at every cut. Audio preview
-is also absent; export preserves the source audio track, but the preview is
-video-only.
+Audio preview. Export carries audio, and sequence export mixes it across items
+(inserting silence for items that have none), but the in-app preview is
+video-only. Also no music bed, no transitions, and no social export presets.
