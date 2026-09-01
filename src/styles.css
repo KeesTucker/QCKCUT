@@ -49,6 +49,11 @@ button.ghost:hover:not(:disabled) { color: var(--text); background: #1d2027; }
   color: #fff;
 }
 
+/* The fixed rows keep their natural height; only .workspace absorbs slack.
+   Without this they shrink and clip their own contents once the stack gets
+   tall enough. */
+.bar, .transport, .timeline, .sequence { flex: none; }
+
 .bar, .transport {
   display: flex;
   align-items: center;
@@ -516,3 +521,38 @@ kbd {
 
 /* Rows in the side panels are draggable onto the track */
 .item[draggable="true"] { cursor: grab; }
+
+/* Music bed */
+.music-gain {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.music-gain[hidden] { display: none; }
+
+.music-name {
+  max-width: 150px;
+  overflow: hidden;
+  color: var(--dim);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.music-gain input[type="range"] {
+  width: 90px;
+  accent-color: var(--accent);
+}
+
+.music-track {
+  display: block;
+  width: calc(100% - 28px);
+  height: 30px;
+  margin: 0 14px 12px;
+  border-radius: 5px;
+  background: #12141a;
+}
+.music-track[hidden] { display: none; }

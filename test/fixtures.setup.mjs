@@ -18,4 +18,10 @@ test('render test clips', async ({ page }) => {
     }, options);
     await writeFile(join(FIXTURE_DIR, `${name}.mp4`), Buffer.from(bytes));
   }
+
+  const music = await page.evaluate(async () => {
+    const { makeMusic } = await import('/test/fixture.mjs');
+    return [...new Uint8Array(await makeMusic().arrayBuffer())];
+  });
+  await writeFile(join(FIXTURE_DIR, 'bed.wav'), Buffer.from(music));
 });

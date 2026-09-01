@@ -5,7 +5,7 @@
 // handful of imports. So sources are opened lazily, kept warm while in use, and
 // the least recently touched idle one is closed once we exceed MAX_OPEN.
 
-import { ALL_FORMATS, BlobSource, CanvasSink, Input, VideoSampleSink } from 'mediabunny';
+import { ALL_FORMATS, AudioBufferSink, BlobSource, CanvasSink, Input, VideoSampleSink } from 'mediabunny';
 
 export const MAX_OPEN = 4;
 export const THUMB_H = 88;
@@ -81,6 +81,21 @@ export function closeAll() {
 
 export const openCount = () => open.size;
 export const isOpen = (id) => open.has(id);
+
+/**
+ * The audio side of an open source, or null when it has none or we cannot
+ * decode it. Resolved once and cached on the entry, since the answer cannot
+ * change for a given file.
+ */
+export async function audioOf(entry) {
+  if (entry.audio === undefined) {
+    const track = await entry.input.getPrimaryAudioTrack();
+    entry.audio = track && (await track.canDecode())
+      ? { track, sink: new AudioBufferSink(track) }
+      : null;
+  }
+  return entry.audio;
+}
 
 // ─── Reading a source ────────────────────────────────────────────────────────
 

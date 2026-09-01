@@ -39,7 +39,7 @@ export async function renderClip(source, start, end, onProgress) {
  * resolves an item to its source. Output takes the first item's dimensions;
  * everything else is letterboxed into them.
  */
-export async function renderSequence(rows, sourceOf, onProgress) {
+export async function renderSequence(rows, sourceOf, onProgress, music = null) {
   if (!rows.length) throw new Error('the sequence is empty');
   const first = sourceOf(rows[0].item);
   if (!first) throw new Error('the first item has no source');
@@ -56,7 +56,7 @@ export async function renderSequence(rows, sourceOf, onProgress) {
   // Audio is mixed first: the track has to exist before the output starts, and
   // we only add one if at least one item actually has sound.
   const total = rows[rows.length - 1].end;
-  const mixed = await mixAudio(rows, sourceOf, total);
+  const mixed = await mixAudio(rows, sourceOf, total, music);
   const audio = mixed ? new AudioBufferSource({ codec: 'aac', bitrate: QUALITY_HIGH }) : null;
   if (audio) output.addAudioTrack(audio);
 
@@ -121,13 +121,26 @@ export async function renderSequence(rows, sourceOf, onProgress) {
  * Flatten every item's audio onto one buffer at a single rate, so sources that
  * disagree about sample rate or channel count still line up. Items with no
  * audio simply leave silence, which is what keeps the picture in sync.
- * Returns null when nothing in the sequence has sound.
+ * The music bed is mixed in underneath at its own gain, and is cut off at the
+ * end of the sequence rather than extending it.
+ *
+ * Returns null when there is nothing to hear at all.
  */
-async function mixAudio(rows, sourceOf, total) {
+async function mixAudio(rows, sourceOf, total, music) {
   if (total <= 0) return null;
   const context = new OfflineAudioContext(
     AUDIO_CHANNELS, Math.ceil(total * AUDIO_RATE), AUDIO_RATE);
   let found = false;
+
+  if (music?.buffer && music.gain > 0) {
+    found = true;
+    const node = context.createBufferSource();
+    const level = context.createGain();
+    level.gain.value = music.gain;
+    node.buffer = music.buffer;
+    node.connect(level).connect(context.destination);
+    node.start(0, 0, Math.min(music.buffer.duration, total));
+  }
 
   for (const row of rows) {
     const source = sourceOf(row.item);

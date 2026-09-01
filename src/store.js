@@ -3,7 +3,7 @@
 // a no-build dev loop bearable: a save does not cost you a re-import.
 
 const NAME = 'qckcut';
-const VERSION = 3;   // v2 renamed 'cuts' to 'clips'; v3 added 'timeline'
+const VERSION = 4;   // v2 renamed 'cuts' to 'clips'; v3 added 'timeline'; v4 'music'
 let handle = null;
 
 function db() {
@@ -11,7 +11,7 @@ function db() {
     const request = indexedDB.open(NAME, VERSION);
     request.onupgradeneeded = () => {
       const d = request.result;
-      for (const store of ['sources', 'clips', 'timeline']) {
+      for (const store of ['sources', 'clips', 'timeline', 'music']) {
         if (!d.objectStoreNames.contains(store)) d.createObjectStore(store, { keyPath: 'id' });
       }
       if (d.objectStoreNames.contains('cuts')) d.deleteObjectStore('cuts');
@@ -65,8 +65,16 @@ export async function allTimeline() {
   return rows.sort((a, b) => a.index - b.index).map(({ index, ...item }) => item);
 }
 
+// At most one music bed, so it is stored under a fixed key rather than by id.
+const MUSIC_KEY = 'bed';
+
+export const putMusic = (music) => run('music', 'readwrite',
+  (s) => s.put({ id: MUSIC_KEY, name: music.name, blob: music.blob, gain: music.gain }));
+export const dropMusic = () => run('music', 'readwrite', (s) => s.delete(MUSIC_KEY));
+export const getMusic = () => run('music', 'readonly', (s) => s.get(MUSIC_KEY));
+
 export async function clearAll() {
-  for (const store of ['sources', 'clips', 'timeline']) {
+  for (const store of ['sources', 'clips', 'timeline', 'music']) {
     await run(store, 'readwrite', (s) => s.clear());
   }
 }

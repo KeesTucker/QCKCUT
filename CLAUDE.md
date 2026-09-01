@@ -19,7 +19,7 @@ Package manager is **pnpm** (pinned in `packageManager`).
 ```bash
 pnpm install
 pnpm dev              # Vite on http://localhost:5173
-pnpm test             # the gate: 87 Playwright tests in real Chrome
+pnpm test             # the gate: 107 Playwright tests in real Chrome
 pnpm build            # production bundle into dist/
 pnpm preview          # serve that bundle
 pnpm test:report      # open the HTML report
@@ -41,7 +41,7 @@ there is no browser download after `pnpm install`.
 ```
 index.html              Vite entry. Stays at the root; that is the convention.
 vite.config.js
-src/                    app.js, media.js, render.js, sequence.js, store.js, styles.css
+src/                    app.js, audio.js, media.js, render.js, sequence.js, store.js, styles.css
 test/
   fixture.mjs           encodes a synthetic clip in the browser
   mediabunny.mjs        re-export, see below
@@ -75,9 +75,10 @@ Two things follow from Vite that are easy to trip over:
 
 ## Architecture
 
-### Five modules
+### Six modules
 
 - `store.js` — IndexedDB. Sources hold blobs, which localStorage cannot take.
+- `audio.js` — the AudioContext, playback scheduling, scrub grains, waveforms.
 - `media.js` — opening media, the decoder pool, filmstrip tile decoding.
 - `sequence.js` — the timeline model. Pure and DOM-free, so it unit-tests cleanly.
 - `render.js` — turning a range or a sequence into an MP4.
@@ -190,6 +191,28 @@ selection has not, and that window is observable from outside.
 The same shape of bug appears in tests: most UI actions start an async chain and
 their intermediate states are visible. See "Async races in specs" below.
 
+### The audio clock is the master
+
+Video used to be paced against `performance.now()`. That is fine for silent
+media but drifts against sound: the audio hardware runs on its own crystal and
+`AudioContext.currentTime` follows that, not the system timer. Once audio is
+playing, `audio.audioClock(startAt)` becomes the timebase and frames are paced
+against it. Silent media falls back to `audio.wallClock()`.
+
+Both playback paths anchor `startAt` a beat (60ms) into the future, so the first
+buffer is scheduled rather than already late.
+
+Buffers are scheduled just in time, within a 0.75s lookahead, not all at once: a
+long range would otherwise build thousands of nodes up front. Every scheduled
+node is stopped when the run's `AbortController` fires, or sound outlives the
+playback that started it.
+
+### Mute is a preview control, not an edit
+
+`S.muted` silences the preview only. Export still renders the music bed and all
+item audio. A bed at zero *gain* is genuinely left out of the mix; a muted app
+is not.
+
 ### Sequence export must not drift
 
 `sink.samples(in, out)` also yields the frame that *spans* `out`. Letting its
@@ -275,6 +298,11 @@ the failure: twice now the "flaky" test was reporting a real ordering bug.
 - `store.clearAll()` clears the database, not the in-memory `S`. Reload after it.
 - `row()` returns `{ el, name, meta }`, not an element, so callers can update the
   text nodes in place instead of rebuilding the row.
+- `setPointerCapture` throws if the pointer has already gone, so it is wrapped:
+  an unguarded call took the whole drag down.
+- The fixed rows (`.bar`, `.transport`, `.timeline`, `.sequence`) are `flex:
+  none`. Without it they shrink and clip their own contents once the stack gets
+  tall enough, rather than the preview giving up the space.
 
 ## Sequence playback and pre-roll
 
@@ -296,8 +324,33 @@ come from different sources with different codecs, resolutions and rotations.
 Every frame is drawn into one output-sized canvas. Output takes the **first
 item's** dimensions; anything shaped differently is letterboxed.
 
+## Sound
+
+Playback plays the source's audio; dragging the filmstrip plays a short grain at
+the playhead, rate-limited to one per 90ms so a fast drag is feedback rather
+than a stutter. Grains are latest-wins.
+
+The music bed is one audio file per project, dropped anywhere on the page. It
+plays under the *sequence* only, never the source preview: the preview is for
+finding a moment in one clip, and music there would only be in the way. Export
+mixes it in at its gain, trimmed to the sequence length.
+
+The bed's decoded `AudioBuffer` and its peaks cannot be stored, so both are
+rebuilt from the blob on load. Peaks are computed once at `screen.width`
+resolution and re-sampled when drawn, so resizing never re-scans the buffer.
+They are normalised against the loudest peak, or a quiet track draws as a flat
+line and tells you nothing.
+
+An audio-only file becomes the bed rather than a source. The extension is only a
+hint though: an `.mp4` can hold sound and nothing else, so a source that turns
+out to have no video track falls back to being the bed instead of failing.
+
+**Tests need `--autoplay-policy=no-user-gesture-required`** (set in
+`playwright.config.mjs`). Chrome keeps an AudioContext suspended until a real
+user gesture, which a test run cannot reliably produce, and without the flag
+every sound path is silently untestable.
+
 ## Not built yet
 
-Audio preview. Export carries audio, and sequence export mixes it across items
-(inserting silence for items that have none), but the in-app preview is
-video-only. Also no music bed, no transitions, and no social export presets.
+Transitions, social export presets, and ducking the music under speech. The
+sequence is also single-track: items cannot overlap.

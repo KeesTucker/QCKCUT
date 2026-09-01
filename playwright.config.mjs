@@ -2,6 +2,13 @@ import { defineConfig } from '@playwright/test';
 
 const PORT = 5173;
 
+// Chrome keeps an AudioContext suspended until a real user gesture, which a
+// headless run has no reliable way to produce. Without this the sound paths are
+// silently untestable.
+const CHROME = {
+  launchOptions: { args: ['--autoplay-policy=no-user-gesture-required'] },
+};
+
 export default defineConfig({
   testDir: 'test',
   fullyParallel: true,
@@ -21,7 +28,7 @@ export default defineConfig({
   },
   projects: [
     // Renders the test clips once, so specs never pay for encoding.
-    { name: 'setup', testMatch: /fixtures\.setup\.mjs/, use: { channel: 'chrome' } },
-    { name: 'ui', testMatch: /ui\/.*\.spec\.mjs/, dependencies: ['setup'], use: { channel: 'chrome' } },
+    { name: 'setup', testMatch: /fixtures\.setup\.mjs/, use: { channel: 'chrome', ...CHROME } },
+    { name: 'ui', testMatch: /ui\/.*\.spec\.mjs/, dependencies: ['setup'], use: { channel: 'chrome', ...CHROME } },
   ],
 });

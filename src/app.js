@@ -1,3 +1,4 @@
+import * as audio from './audio.js';
 import * as media from './media.js';
 import * as render from './render.js';
 import * as sequence from './sequence.js';
@@ -14,6 +15,7 @@ const S = {
   sources: [],      // { id, name, blob, duration, width, height, codec, thumbs, thumbCount, poster }
   clips: [],         // { id, sourceId, in, out, label }
   timeline: [],     // { id, sourceId, in, out, label } — order is the timing
+  music: null,      // { name, blob, buffer, peaks, gain, duration }
   activeId: null,
   activeClipId: null,
   activeItemId: null,
@@ -24,6 +26,7 @@ const S = {
   out: 0,
   playing: false,
   exporting: false,
+  muted: false,
 };
 
 const MIN_RANGE = 0.05;   // shortest selection we allow, seconds
@@ -63,6 +66,13 @@ const track = $('track');
 const seqPlayBtn = $('seqPlay');
 const seqExportBtn = $('seqExport');
 const seqDurationEl = $('seqDuration');
+const muteBtn = $('muteBtn');
+const musicGainWrap = $('musicGainWrap');
+const musicGain = $('musicGain');
+const musicName = $('musicName');
+const musicDrop = $('musicDrop');
+const musicTrack = $('musicTrack');
+const mctx = musicTrack.getContext('2d');
 const fileNameEl = $('fileName');
 const statusEl = $('status');
 const timeEl = $('time');
@@ -161,21 +171,37 @@ export async function seek(time) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Aborting this stops any sound scheduled for the current playback.
+let playRun = null;
+
 export async function play() {
   if (S.playing || !held) return;
   S.playing = true;
   playBtn.textContent = 'Pause';
 
   const from = S.playhead >= S.out - 0.02 ? S.in : S.playhead;
-  const startedAt = performance.now();
-  let painted = false;
+  const stopping = new AbortController();
+  playRun = stopping;
 
+  // Start the sound first, then take its clock. Video paced against
+  // performance.now() drifts against the audio hardware's own timebase.
+  const sound = S.muted ? null : await media.audioOf(held);
+  let elapsed = audio.wallClock();
+  if (sound) {
+    const ctx = audio.unlock();
+    const startAt = ctx.currentTime + 0.06;   // a beat to get the first buffer out
+    elapsed = audio.audioClock(startAt);
+    audio.schedule({ sink: sound.sink, from, to: S.out, startAt, signal: stopping.signal })
+      .catch(fail);
+  }
+
+  let painted = false;
   try {
     for await (const sample of held.sink.samples(from, S.out)) {
       try {
         if (!S.playing) break;
-        const due = (sample.timestamp - from) * 1000;
-        const wait = due - (performance.now() - startedAt);
+        const due = sample.timestamp - from;
+        const wait = (due - elapsed()) * 1000;
         // Drop a late frame rather than falling further behind, but never drop
         // the first one or the preview stays blank on a slow start.
         if (wait < -50 && painted) continue;
@@ -190,6 +216,8 @@ export async function play() {
       }
     }
   } finally {
+    stopping.abort();
+    if (playRun === stopping) playRun = null;
     if (S.playing) {
       S.playhead = S.out;
       updateTransport();
@@ -200,6 +228,9 @@ export async function play() {
 
 export function pause() {
   S.playing = false;
+  playRun?.abort();
+  playRun = null;
+  audio.stopScrub();
   playBtn.textContent = 'Play';
 }
 
@@ -242,7 +273,7 @@ export async function buildStrip(source) {
         source.posterUrl = tile.toDataURL();
       }
       if (source.id === S.activeId) drawStrip();
-      if (source.thumbs.length === 1) renderSources();
+      if (source.thumbs.length === 1) { renderSources(); renderTrack(); }
     }
   } finally {
     if (stripRuns.get(source.id) === run) stripRuns.delete(source.id);
@@ -543,6 +574,7 @@ function updateUI() {
   renderSources();
   renderClips();
   renderTrack();
+  renderMusic();
   updateRange();
   updateTransport();
   drawStrip();
@@ -669,6 +701,9 @@ async function syncActiveClip() {
 // trimming or deleting ripples for free.
 
 const DRAG_TYPE = 'application/x-qckcut';
+
+// Aborting this stops any sound scheduled for the running sequence.
+let seqRun = null;
 
 function renderTrack() {
   const rows = sequenceRows();
@@ -871,9 +906,18 @@ export async function playSequence() {
   }
 
   const origin = S.seqPlayhead;
-  const startedAt = performance.now();
-  let painted = false;
+  const stopping = new AbortController();
+  seqRun = stopping;
 
+  // One clock for the whole sequence, anchored before the first frame. Each
+  // item's audio is scheduled onto it at that item's own offset, so sound stays
+  // continuous across the cuts even though the decoders change.
+  const ctx = audio.unlock();
+  const startAt = ctx.currentTime + 0.06;
+  const elapsed = S.muted ? audio.wallClock() : audio.audioClock(startAt);
+  if (!S.muted) startMusic(startAt, origin, total - origin);
+
+  let painted = false;
   try {
     for (const [i, row] of rows.entries()) {
       if (!S.playingSeq) break;
@@ -885,12 +929,25 @@ export async function playSequence() {
       preroll(rows[i + 1]);
       const from = sequence.sourceTime(row, Math.max(origin, row.start));
 
+      if (!S.muted) {
+        const sound = await media.audioOf(entry);
+        if (sound) {
+          audio.schedule({
+            sink: sound.sink,
+            from,
+            to: row.item.out,
+            startAt: startAt + (Math.max(origin, row.start) - origin),
+            signal: stopping.signal,
+          }).catch(fail);
+        }
+      }
+
       try {
         for await (const sample of entry.sink.samples(from, row.item.out)) {
           try {
             if (!S.playingSeq) break;
             const at = row.start + (sample.timestamp - row.item.in);
-            const wait = (at - origin) * 1000 - (performance.now() - startedAt);
+            const wait = (at - origin - elapsed()) * 1000;
             if (wait < -50 && painted) continue;
             if (wait > 0) await sleep(wait);
             if (!S.playingSeq) break;
@@ -907,6 +964,8 @@ export async function playSequence() {
       }
     }
   } finally {
+    stopping.abort();
+    if (seqRun === stopping) seqRun = null;
     if (S.playingSeq) S.seqPlayhead = total;
     stopSequence();
   }
@@ -914,6 +973,9 @@ export async function playSequence() {
 
 export function stopSequence() {
   S.playingSeq = false;
+  seqRun?.abort();
+  seqRun = null;
+  stopMusic();
   seqPlayBtn.textContent = 'Play sequence';
   renderTrack();
 }
@@ -929,7 +991,7 @@ export async function exportSequence() {
     const rows = sequenceRows();
     const started = performance.now();
     const blob = await render.renderSequence(rows, (item) => sourceById(item.sourceId),
-      (p) => setStatus(`rendering sequence ${Math.round(p * 100)}%`));
+      (p) => setStatus(`rendering sequence ${Math.round(p * 100)}%`), S.music);
     const took = (performance.now() - started) / 1000;
     render.download(blob, 'sequence.mp4');
     const total = rows[rows.length - 1].end;
@@ -944,6 +1006,146 @@ export async function exportSequence() {
 seqPlayBtn.addEventListener('click', () => (S.playingSeq ? stopSequence() : playSequence().catch(fail)));
 seqExportBtn.addEventListener('click', () => exportSequence().catch(fail));
 
+// ─── Music bed ───────────────────────────────────────────────────────────────
+// One bed per project. It plays under the sequence only, not the source
+// preview: the preview is for finding a moment in one clip, and music there
+// would just be in the way.
+
+export async function setMusic(file, gain = 0.35) {
+  const buffer = await audio.decode(file);
+  S.music = {
+    name: file.name,
+    blob: file,
+    buffer,
+    duration: buffer.duration,
+    gain,
+    peaks: null,
+    loudest: 1,
+  };
+  await store.putMusic(S.music);
+  updateUI();
+  return S.music;
+}
+
+export async function removeMusic() {
+  stopMusic();
+  S.music = null;
+  await store.dropMusic();
+  updateUI();
+}
+
+export async function setMusicGain(gain) {
+  if (!S.music) return;
+  S.music.gain = clamp(gain, 0, 1);
+  if (musicNode) musicNode.level.gain.value = S.music.gain;
+  await store.putMusic(S.music);
+  renderMusic();
+}
+
+function renderMusic() {
+  const music = S.music;
+  musicGainWrap.hidden = !music;
+  musicTrack.hidden = !music;
+  if (!music) return;
+
+  musicName.textContent = music.name;
+  if (musicGain.value !== String(music.gain)) musicGain.value = String(music.gain);
+
+  const cssW = musicTrack.clientWidth;
+  if (!cssW) return;
+  const dpr = window.devicePixelRatio || 1;
+  const height = 30;
+  musicTrack.width = Math.round(cssW * dpr);
+  musicTrack.height = Math.round(height * dpr);
+  mctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  mctx.fillStyle = '#12141a';
+  mctx.fillRect(0, 0, cssW, height);
+
+  // Peaks are computed once for the widest window this display can produce,
+  // then re-sampled on redraw, so resizing never re-scans the buffer.
+  if (!music.peaks) {
+    music.peaks = audio.peaks(music.buffer, Math.ceil(window.screen?.width ?? 1920));
+    // Normalised, or a quiet track draws as a flat line and tells you nothing
+    // about its shape.
+    music.loudest = music.peaks.reduce((a, b) => (b > a ? b : a), 0) || 1;
+  }
+
+  const total = sequence.totalDuration(S.timeline);
+  const span = total > 0 ? total : music.duration;
+  // The bed is cut at the end of the sequence, so only the part that will be
+  // heard is drawn, stretched across the lane.
+  const heard = Math.min(1, span / music.duration);
+  const columns = Math.floor(cssW);
+  const middle = height / 2;
+  const room = height - 6;
+
+  for (let x = 0; x < columns; x++) {
+    const at = Math.floor((x / columns) * heard * music.peaks.length);
+    const peak = music.peaks[Math.min(at, music.peaks.length - 1)] / music.loudest;
+    // The faint bar is the track itself; the solid one is what you will hear at
+    // the current level.
+    const full = Math.max(1, peak * room);
+    const level = Math.max(1, peak * music.gain * room);
+    mctx.fillStyle = 'rgba(255, 77, 61, .22)';
+    mctx.fillRect(x, middle - full / 2, 1, full);
+    mctx.fillStyle = 'rgba(255, 77, 61, .85)';
+    mctx.fillRect(x, middle - level / 2, 1, level);
+  }
+}
+
+// Playback of the bed is one buffer source, started at an offset into the
+// sequence and stopped when playback stops.
+let musicNode = null;
+
+function startMusic(startAt, offset, duration) {
+  stopMusic();
+  const music = S.music;
+  if (!music || S.muted || music.gain <= 0) return;
+  if (offset >= music.buffer.duration) return;
+
+  const ctx = audio.unlock();
+  const node = ctx.createBufferSource();
+  const level = ctx.createGain();
+  level.gain.value = music.gain;
+  node.buffer = music.buffer;
+  node.connect(level).connect(ctx.destination);
+  node.start(Math.max(startAt, ctx.currentTime), offset,
+    Math.min(music.buffer.duration - offset, duration));
+  musicNode = { node, level };
+}
+
+function stopMusic() {
+  if (!musicNode) return;
+  try { musicNode.node.stop(); } catch {}
+  musicNode = null;
+}
+
+musicGain.addEventListener('input', () => setMusicGain(Number(musicGain.value)).catch(fail));
+musicDrop.addEventListener('click', () => removeMusic().catch(fail));
+
+// ─── Sound toggle ────────────────────────────────────────────────────────────
+
+export function setMuted(muted) {
+  S.muted = muted;
+  if (muted) {
+    audio.stopScrub();
+    stopMusic();
+  }
+  muteBtn.textContent = muted ? 'Muted' : 'Sound on';
+}
+
+muteBtn.addEventListener('click', () => setMuted(!S.muted));
+
+// Capturing can throw if the pointer has already gone (a cancelled gesture, or
+// a synthetic event), and that must not take the drag down with it.
+const capture = (el, pointerId) => {
+  try {
+    el.setPointerCapture(pointerId);
+  } catch {
+    /* the drag still works, it just stops tracking outside the element */
+  }
+};
+
 // ─── Timeline interaction ────────────────────────────────────────────────────
 // The whole strip is one scrub surface. Handles capture the pointer first, so
 // dragging a handle trims instead of scrubbing.
@@ -953,23 +1155,45 @@ function dragTime(event) {
   return clamp(timeForX(event.clientX - rect.left), 0, active()?.duration ?? 0);
 }
 
+// Scrub audio: a short grain at the playhead, latest wins, and only while the
+// pointer is actually dragging. Firing it on every seek would also fire on
+// arrow keys and on programmatic seeks, which is noise rather than feedback.
+let lastGrain = 0;
+const GRAIN_GAP = 90;   // ms between grains, so a fast drag does not stutter
+
+async function scrubAudio(time) {
+  if (S.muted || !held) return;
+  const at = performance.now();
+  if (at - lastGrain < GRAIN_GAP) return;
+  lastGrain = at;
+  const sound = await media.audioOf(held);
+  if (sound) await audio.scrub(sound.sink, time);
+}
+
 timeline.addEventListener('pointerdown', (event) => {
   if (!held) return;
   pause();
-  timeline.setPointerCapture(event.pointerId);
-  seek(dragTime(event)).catch(fail);
+  capture(timeline, event.pointerId);
+  const t = dragTime(event);
+  seek(t).catch(fail);
+  scrubAudio(t).catch(fail);
 });
 
 timeline.addEventListener('pointermove', (event) => {
-  if (timeline.hasPointerCapture(event.pointerId)) seek(dragTime(event)).catch(fail);
+  if (!timeline.hasPointerCapture(event.pointerId)) return;
+  const t = dragTime(event);
+  seek(t).catch(fail);
+  scrubAudio(t).catch(fail);
 });
+
+timeline.addEventListener('pointerup', () => audio.stopScrub());
 
 function bindHandle(el, which) {
   el.addEventListener('pointerdown', (event) => {
     if (!held) return;
     event.stopPropagation();
     pause();
-    el.setPointerCapture(event.pointerId);
+    capture(el, event.pointerId);
   });
   el.addEventListener('pointermove', (event) => {
     if (!el.hasPointerCapture(event.pointerId)) return;
@@ -1009,6 +1233,7 @@ addSourceBtn.addEventListener('click', () => pickFiles());
 document.addEventListener('keydown', (event) => {
   if (event.target.tagName === 'INPUT') return;
   if (event.key === '?') { event.preventDefault(); return openHelp(); }
+  if (event.key === 'm') return setMuted(!S.muted);
   if (event.key === 'Escape' && helpOpen()) return closeHelp();
   if (!held || helpOpen()) return;
   const frame = 1 / 30;
@@ -1087,10 +1312,24 @@ function fail(error) {
   setStatus(error?.message ?? String(error));
 }
 
+const isVideo = (file) =>
+  file.type.startsWith('video/') || /\.(mp4|mov|webm|mkv|m4v)$/i.test(file.name);
+const isAudio = (file) =>
+  file.type.startsWith('audio/') || /\.(mp3|m4a|aac|wav|flac|ogg|opus)$/i.test(file.name);
+
 async function addFiles(files) {
   for (const file of files) {
-    if (file.type.startsWith('video/') || /\.(mp4|mov|webm|mkv|m4v)$/i.test(file.name)) {
-      await addSource(file).catch(fail);
+    // An audio-only file is a music bed, not a source: it has no picture to
+    // cut. The extension is only a hint though, since an .mp4 or .m4a can hold
+    // sound and nothing else, so a source that turns out to have no video
+    // falls back to being the bed rather than failing.
+    if (isVideo(file)) {
+      await addSource(file).catch((error) => {
+        if (/no video track/i.test(error?.message ?? '')) return setMusic(file).catch(fail);
+        return fail(error);
+      });
+    } else if (isAudio(file)) {
+      await setMusic(file).catch(fail);
     }
   }
 }
@@ -1098,7 +1337,7 @@ async function addFiles(files) {
 function pickFiles() {
   const picker = document.createElement('input');
   picker.type = 'file';
-  picker.accept = 'video/*';
+  picker.accept = 'video/*,audio/*';
   picker.multiple = true;
   picker.onchange = () => addFiles([...picker.files]).catch(fail);
   picker.click();
@@ -1116,6 +1355,8 @@ document.addEventListener('dragleave', (event) => {
   if (!event.relatedTarget) drop.classList.remove('over');
 });
 
+document.addEventListener('pointerdown', () => audio.unlock(), { capture: true });
+
 document.addEventListener('drop', (event) => {
   drop.classList.remove('over');
   const files = [...(event.dataTransfer?.files ?? [])];
@@ -1129,6 +1370,7 @@ drop.addEventListener('click', pickFiles);
 let resizeTimer = 0;
 window.addEventListener('resize', () => {
   drawStrip();
+  renderMusic();
   updateRange();
   updateTransport();
   // Only devicePixelRatio can change what needs decoding (dragging to a
@@ -1139,10 +1381,20 @@ window.addEventListener('resize', () => {
 
 /** Restore the project from IndexedDB. */
 export async function restore() {
-  const [sources, clips, timeline] = await Promise.all([
-    store.allSources(), store.allClips(), store.allTimeline(),
+  const [sources, clips, timeline, music] = await Promise.all([
+    store.allSources(), store.allClips(), store.allTimeline(), store.getMusic(),
   ]);
-  if (!sources.length) return;
+  if (music) {
+    // The decoded buffer and its peaks are rebuilt; neither is storable.
+    const buffer = await audio.decode(music.blob).catch(() => null);
+    if (buffer) {
+      S.music = { ...music, buffer, duration: buffer.duration, peaks: null, loudest: 1 };
+    }
+  }
+  if (!sources.length) {
+    updateUI();
+    return;
+  }
   const known = (id) => sources.some((s) => s.id === id);
   S.sources = sources.map((s) => ({ ...s, thumbs: [], thumbCount: 0, poster: null, posterUrl: null }));
   S.clips = clips.filter((c) => known(c.sourceId));
@@ -1168,6 +1420,10 @@ export function snapshot() {
     activeItemId: S.activeItemId,
     seqPlayhead: S.seqPlayhead,
     playingSeq: S.playingSeq,
+    muted: S.muted,
+    music: S.music
+      ? { name: S.music.name, gain: S.music.gain, duration: S.music.duration }
+      : null,
     playhead: S.playhead,
     in: S.in,
     out: S.out,
@@ -1189,6 +1445,7 @@ Object.assign(window, {
   addClip, selectClip, removeClip, exportRange, buildStrip, queueStrip, drawStrip, stripsIdle,
   sequence, render, addToSequence, removeFromSequence, moveInSequence, selectItem,
   appendRange, playSequence, stopSequence, exportSequence,
+  audio, setMusic, removeMusic, setMusicGain, setMuted,
   timecode, parseTimecode, clamp, clipLabel, exportName, setClipRange,
 });
 
