@@ -62,6 +62,14 @@
       </button>
     </div>
 
+    <div class="warn-toast" id="warnToast" role="status" aria-live="polite">
+      <div class="wt-row">
+        <span class="wt-icon">&#9888;</span>
+        <span class="wt-title" id="warnTitle"></span>
+        <span class="wt-msg" id="warnMsg"></span>
+      </div>
+    </div>
+
     <div id="drop" class="drop">
       <p>Drop a video here</p>
       <p class="hint">mp4, mov, webm, mkv, mp3, wav</p>
@@ -106,10 +114,11 @@
       <input id="musicGain" type="range" min="0" max="1" step="0.01" value="0.35" aria-label="Music level">
       <button id="musicDrop" class="ghost" title="Remove the music bed">&#10005;</button>
     </label>
-    <button id="seqExport" disabled>Export sequence</button>
   </div>
   <div class="track-wrap">
+    <div id="seqRuler" class="ruler" title="Drag to scrub the sequence"></div>
     <ol id="track" class="track"></ol>
+    <div id="seqPlayheadEl" class="seq-playhead"></div>
     <p id="trackEmpty" class="empty">Drag clips or sources here to build a sequence</p>
   </div>
   <canvas id="musicTrack" class="music-track" hidden></canvas>
@@ -144,6 +153,9 @@
         shows as a band along the bottom of the filmstrip.</p>
         <p>Double-click any name to rename it: a source, a clip, or an item on the sequence.
         <kbd>Enter</kbd> keeps it, <kbd>Esc</kbd> puts it back.</p>
+        <p>Clips are cut from a source, so the marking controls only work while the viewer is
+        showing one. Trying to mark while the sequence is showing says so rather than quietly
+        cutting from whichever source happens to be selected.</p>
       </section>
 
       <section>
@@ -158,11 +170,12 @@
       <section>
         <h4>Sequence</h4>
         <p>Drag clips or whole sources onto the Sequence track to assemble them,
-        and drag them within the track to reorder. Position comes from order, so
+        and drag them within the track to reorder. The strip above the items is a
+        scrubber: drag it to move through the whole sequence, across the cuts. Position comes from order, so
         there are never gaps to tidy up. Clicking an item jumps the preview to
-        its first frame and switches the viewer to it. <kbd>Export sequence</kbd>
-        renders the whole thing to one MP4 at the first item's dimensions,
-        letterboxing anything shaped differently.</p>
+        its first frame and switches the viewer to it. Exporting while the
+        sequence is showing renders the whole thing to one MP4 at the first
+        item's dimensions, letterboxing anything shaped differently.</p>
       </section>
 
       <section>
@@ -181,9 +194,10 @@
 
       <section>
         <h4>Export</h4>
-        <p><kbd>Export</kbd> renders the current range to an MP4 and downloads it, keeping the
-        audio. Encoding runs on your GPU, so it is usually several times faster than the clip
-        is long.</p>
+        <p><kbd>Export</kbd> renders whatever the viewer is showing, and says which: the source's
+        marked range, or the whole sequence. Both come out as an MP4 with audio. Encoding runs on
+        your GPU, so it is usually several times faster than the result is long. The preview speed
+        never affects it.</p>
       </section>
 
       <section>

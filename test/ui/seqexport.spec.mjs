@@ -137,7 +137,7 @@ test('the app is usable again after rendering a sequence', async ({ app }) => {
   await build(app, { clip: 'land', in: 0, out: 1 });
   await render(app);
 
-  await expect(app.page.locator('#seqExport')).toBeEnabled();
+  await expect(app.page.locator('#exportBtn')).toBeEnabled();
   const ts = await app.page.evaluate(async () => {
     const source = window.S.sources.find((s) => s.id === window.S.activeId);
     const sample = await window.media.using(source, ({ sink }) => sink.getSample(2));

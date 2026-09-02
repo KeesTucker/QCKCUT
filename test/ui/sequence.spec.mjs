@@ -192,12 +192,21 @@ test('the sequence survives a reload in order', async ({ app }) => {
   expect((await app.state()).sequenceDuration).toBeCloseTo(4.5, 2);
 });
 
-test('export stays disabled while the sequence is empty', async ({ app }) => {
+test('export names what it will render, and follows the view', async ({ app }) => {
   await app.add('land');
-  await expect(app.page.locator('#seqExport')).toBeDisabled();
+  const button = app.page.locator('#exportBtn');
+
+  // Source view: the marked range.
+  await expect(button).toHaveText('Export clip');
+  await expect(button).toBeEnabled();
+
+  // Sequence view with nothing on it: nothing to render.
+  await app.page.evaluate(() => window.setView('sequence'));
+  await expect(button).toHaveText('Export sequence');
+  await expect(button).toBeDisabled();
 
   await app.page.evaluate(() => { window.S.in = 0; window.S.out = 1; return window.appendRange(); });
-  await expect(app.page.locator('#seqExport')).toBeEnabled();
+  await expect(button).toBeEnabled();
 });
 
 // The handlers above are exercised through their functions; these drive the

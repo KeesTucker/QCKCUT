@@ -1,10 +1,17 @@
+/* Palette shared with QCKSCRL, so the two read as one family. */
 :root {
-  --bg: #0e0f12;
-  --panel: #16181d;
-  --line: #2a2d35;
-  --text: #e6e8ee;
-  --dim: #878c99;
-  --accent: #ff4d3d;
+  --bg: #0d0d0d;
+  --s1: #181818;
+  --s2: #222;
+  --s3: #2c2c2c;
+  --line: #333;
+  --text: #f0f0f0;
+  --dim: #777;
+  --accent: #c084fc;
+  --accent2: #818cf8;
+  --grad: linear-gradient(135deg, var(--accent), var(--accent2));
+
+  --panel: var(--s1);
   --strip-h: 88px;
 }
 
@@ -30,7 +37,7 @@ button {
   font: inherit;
   cursor: pointer;
 }
-button:hover:not(:disabled) { border-color: #3d424e; background: #1d2027; }
+button:hover:not(:disabled) { border-color: var(--s3); background: var(--s2); }
 button:disabled { opacity: .35; cursor: default; }
 
 button.ghost {
@@ -41,13 +48,15 @@ button.ghost {
   font-size: 16px;
   line-height: 1;
 }
-button.ghost:hover:not(:disabled) { color: var(--text); background: #1d2027; }
+button.ghost:hover:not(:disabled) { color: var(--text); background: var(--s2); }
 
 #exportBtn:not(:disabled) {
-  border-color: var(--accent);
-  background: var(--accent);
+  border-color: transparent;
+  background: var(--grad);
   color: #fff;
+  font-weight: 600;
 }
+#exportBtn:not(:disabled):hover { opacity: .85; background: var(--grad); }
 
 /* The fixed rows keep their natural height; only .workspace absorbs slack.
    Without this they shrink and clip their own contents once the stack gets
@@ -64,7 +73,16 @@ button.ghost:hover:not(:disabled) { color: var(--text); background: #1d2027; }
 }
 .transport { border-bottom: none; border-top: 1px solid var(--line); }
 
-h1 { margin: 0; font-size: 13px; font-weight: 700; letter-spacing: .14em; }
+h1 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: .14em;
+  background: var(--grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
 
 .spacer { flex: 1; }
 .filename, .status { color: var(--dim); }
@@ -138,8 +156,8 @@ h1 { margin: 0; font-size: 13px; font-weight: 700; letter-spacing: .14em; }
   border-radius: 8px;
   cursor: pointer;
 }
-.item:hover { background: #1d2027; }
-.item.active { border-color: var(--accent); background: #21151a; }
+.item:hover { background: var(--s2); }
+.item.active { border-color: var(--accent); background: #1e1526; }
 .list li + li { margin-top: 2px; }
 
 .item canvas {
@@ -333,12 +351,14 @@ h1 { margin: 0; font-size: 13px; font-weight: 700; letter-spacing: .14em; }
 
 /* Help */
 .help-btn {
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
   padding: 0;
   border-radius: 50%;
+  background: var(--s2);
   color: var(--dim);
-  font-size: 11px;
+  font-size: 10px;
+  font-weight: 700;
   line-height: 1;
 }
 .help-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
@@ -379,7 +399,7 @@ h1 { margin: 0; font-size: 13px; font-weight: 700; letter-spacing: .14em; }
   background: none;
   color: var(--dim);
 }
-.icon-btn:hover:not(:disabled) { color: var(--text); background: #1d2027; }
+.icon-btn:hover:not(:disabled) { color: var(--text); background: var(--s2); }
 
 .help-body { padding: 4px 20px 20px; overflow-y: auto; }
 .help-body section { padding-top: 16px; }
@@ -455,7 +475,9 @@ kbd {
   text-align: left;
   pointer-events: none;
 }
-.track:not(:empty) + .empty { display: none; }
+/* Not `.track:not(:empty) + .empty`: the playhead sits between them, so the
+   adjacent-sibling match silently stopped working. */
+.sequence.has-items .empty { display: none; }
 
 /* Width is proportional to duration, so the track reads as a timeline even
    though position is stored as order. */
@@ -469,7 +491,7 @@ kbd {
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: #1d2027 center/cover no-repeat;
+  background: var(--s2) center/cover no-repeat;
   cursor: grab;
   user-select: none;
 }
@@ -480,7 +502,7 @@ kbd {
   background: linear-gradient(180deg, rgba(14, 15, 18, .25), rgba(14, 15, 18, .82));
 }
 .track-item > * { position: relative; }
-.track-item:hover { border-color: #3d424e; }
+.track-item:hover { border-color: var(--s3); }
 .track-item.active { border-color: var(--accent); }
 .track-item.dragging { opacity: .4; }
 
@@ -553,17 +575,17 @@ kbd {
   height: 30px;
   margin: 0 14px 12px;
   border-radius: 5px;
-  background: #12141a;
+  background: #111;
 }
 .music-track[hidden] { display: none; }
 
 /* Audio sources have no pictures, so they read as blue rather than a poster */
 .track-item.audio {
-  background: linear-gradient(180deg, #16303f, #10202a);
-  border-color: #2b4a5e;
+  background: linear-gradient(180deg, #232447, #16172c);
+  border-color: #3a3b63;
 }
 .track-item.audio::before { background: none; }
-.track-item.audio .track-item-name { color: #9ed4f5; }
+.track-item.audio .track-item-name { color: #b6bcfb; }
 
 .music-track.over { outline: 1px dashed var(--accent); outline-offset: -3px; }
 
@@ -604,7 +626,7 @@ kbd {
 .controls:focus-within { opacity: 1; }
 .controls.hidden { display: none; }
 
-.controls .time { padding: 0 4px; color: #c8ccd6; }
+.controls .time { padding: 0 4px; color: #d4d4d8; }
 
 .ctl {
   display: grid;
@@ -697,3 +719,58 @@ kbd {
 }
 .rename:focus { outline: none; }
 .track-item-name .rename { font-size: 11px; }
+
+/* Sequence scrubber. Items are draggable for reordering, so the scrub surface
+   has to be its own strip or the two gestures fight. */
+.ruler {
+  height: 14px;
+  margin: 0 14px 4px;
+  border-radius: 3px;
+  background:
+    repeating-linear-gradient(90deg, var(--line) 0 1px, transparent 1px 40px),
+    #111;
+  cursor: pointer;
+  touch-action: none;
+}
+.ruler:hover { background-color: var(--s2); }
+
+.seq-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 12px;
+  width: 2px;
+  margin-left: -1px;
+  background: #fff;
+  box-shadow: 0 0 6px rgba(0, 0, 0, .9);
+  pointer-events: none;
+}
+.sequence:not(.has-items) .seq-playhead,
+.sequence:not(.has-items) .ruler { display: none; }
+
+/* A warning about what you just tried to do, floating over the picture rather
+   than taking permanent space in a toolbar. Borrowed from QCKSCRL. */
+.warn-toast {
+  position: absolute;
+  left: 50%;
+  bottom: 60px;
+  z-index: 4;
+  display: none;
+  max-width: min(520px, calc(100% - 48px));
+  transform: translateX(-50%);
+}
+.warn-toast.visible { display: flex; }
+
+.wt-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border: 1px solid #6b4f12;
+  border-left: 3px solid #fbbf24;
+  border-radius: 6px;
+  background: rgba(28, 22, 8, .94);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .5);
+}
+.wt-icon { flex-shrink: 0; color: #fbbf24; font-size: 12px; }
+.wt-title { color: #fbbf24; font-size: 11px; font-weight: 700; white-space: nowrap; }
+.wt-msg { color: #d8cdb4; font-size: 11px; }

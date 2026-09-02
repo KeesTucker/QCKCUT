@@ -26,9 +26,11 @@ test('its filmstrip is a waveform rather than tiles', async ({ app }) => {
     const ctx = canvas.getContext('2d');
     const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
     let lit = 0;
+    // An audio source has no tiles, so anything above the ground is waveform.
+    // Measured by brightness rather than channel, so the palette can change.
     for (let i = 0; i < data.length; i += 4) {
-      // The waveform is drawn blue; video tiles never are.
-      if (data[i + 2] > 150 && data[i] < 180) lit++;
+      const luma = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
+      if (luma > 40) lit++;
     }
     return { lit, peaks: source.peaks?.length ?? 0, thumbs: source.thumbs.length };
   });

@@ -67,7 +67,6 @@ const addSourceBtn = $('addSource');
 const sourceList = $('sourceList');
 const clipList = $('clipList');
 const track = $('track');
-const seqExportBtn = $('seqExport');
 const seqDurationEl = $('seqDuration');
 const muteBtn = $('muteBtn');
 const rateSel = $('rateSel');
@@ -75,6 +74,11 @@ const viewBadge = $('viewBadge');
 const viewKind = $('viewKind');
 const viewName = $('viewName');
 const sequenceEl = document.querySelector('.sequence');
+const seqRuler = $('seqRuler');
+const seqPlayheadEl = $('seqPlayheadEl');
+const warnToast = $('warnToast');
+const warnTitle = $('warnTitle');
+const warnMsg = $('warnMsg');
 const controls = $('controls');
 const hintEl = $('hint');
 const musicGainWrap = $('musicGainWrap');
@@ -134,6 +138,16 @@ export function exportName(source, clip) {
 
 let held = null;   // the acquired decoder entry for the active source
 
+// Canvas has no access to CSS custom properties, so the palette is mirrored
+// here. Keep these in step with :root in styles.css.
+const INK = {
+  ground: '#0a0a0a',
+  lane: '#111',
+  placeholder: '#6b6b76',
+  accent: '192, 132, 252',    // --accent  #c084fc
+  accent2: '129, 140, 248',   // --accent2 #818cf8
+};
+
 function paint(sample) {
   pctx.fillStyle = '#000';
   pctx.fillRect(0, 0, preview.width, preview.height);
@@ -145,7 +159,7 @@ function paintSilence(label) {
   pctx.fillStyle = '#000';
   pctx.fillRect(0, 0, preview.width, preview.height);
   if (!label) return;
-  pctx.fillStyle = '#5c6270';
+  pctx.fillStyle = INK.placeholder;
   pctx.font = `${Math.round(preview.height / 16)}px ui-monospace, Menlo, monospace`;
   pctx.textAlign = 'center';
   pctx.textBaseline = 'middle';
@@ -366,7 +380,7 @@ export function drawStrip() {
   strip.width = Math.round(cssW * dpr);
   strip.height = Math.round(media.THUMB_H * dpr);
   sctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  sctx.fillStyle = '#0b0c0f';
+  sctx.fillStyle = INK.ground;
   sctx.fillRect(0, 0, cssW, media.THUMB_H);
   if (!source?.thumbCount) return;
 
@@ -391,7 +405,7 @@ function drawWaveform(ctx, source, width, height) {
   if (!source.peaks) return;
   const middle = height / 2;
   const room = height - 10;
-  ctx.fillStyle = 'rgba(120, 200, 255, .75)';
+  ctx.fillStyle = `rgba(${INK.accent2}, .85)`;
   for (let x = 0; x < Math.floor(width); x++) {
     const at = Math.floor((x / width) * source.peaks.length);
     const peak = source.peaks[Math.min(at, source.peaks.length - 1)] / source.loudest;
@@ -403,8 +417,8 @@ function drawWaveform(ctx, source, width, height) {
 // Every clip of this source shows as a band on its own filmstrip, so you can see
 // what you have already taken without leaving the timeline.
 function drawClipMarks(cssW, source) {
-  sctx.fillStyle = 'rgba(255, 77, 61, .28)';
-  sctx.strokeStyle = 'rgba(255, 77, 61, .9)';
+  sctx.fillStyle = `rgba(${INK.accent}, .30)`;
+  sctx.strokeStyle = `rgba(${INK.accent}, .95)`;
   sctx.lineWidth = 1;
   for (const clip of clipsFor(source.id)) {
     const x = (clip.in / source.duration) * cssW;
@@ -732,8 +746,13 @@ function updateUI() {
   timeline.classList.toggle('empty', !loaded);
   drop.classList.toggle('hidden', S.sources.length > 0);
   controls.classList.toggle('hidden', !loaded && !S.timeline.length);
-  for (const b of [exportBtn, markInBtn, markOutBtn, addClipBtn]) b.disabled = !loaded;
-  playBtn.disabled = S.view === 'sequence' ? !S.timeline.length : !loaded;
+  for (const b of [markInBtn, markOutBtn, addClipBtn]) b.disabled = !loaded;
+
+  const onSequence = S.view === 'sequence';
+  playBtn.disabled = onSequence ? !S.timeline.length : !loaded;
+  // Export renders whatever the viewer is showing, and says so.
+  exportBtn.textContent = onSequence ? 'Export sequence' : 'Export clip';
+  exportBtn.disabled = S.exporting || (onSequence ? !S.timeline.length : !loaded);
   fileNameEl.textContent = loaded ? describe(source) : 'no clip';
   renderSources();
   renderClips();
@@ -743,6 +762,7 @@ function updateUI() {
   updateMark();
   updateView();
   updateTransport();
+  updateSeqPlayhead();
   drawStrip();
 }
 
@@ -829,6 +849,7 @@ export async function removeSource(id) {
 export function beginMark() {
   const source = active();
   if (!source) return null;
+  clearWarning();
   S.marking = { at: S.playhead, wasIn: S.in, wasOut: S.out };
   applyMark();
   return S.marking;
@@ -860,8 +881,8 @@ function applyMark() {
  * Returns the clip when one was made.
  */
 export async function markClip() {
+  if (!requireSource()) return null;
   const source = active();
-  if (!source) return null;
   if (!S.marking) {
     beginMark();
     setHint('marking… C again to keep it, Esc to cancel');
@@ -883,6 +904,7 @@ export async function markClip() {
 export async function addClip() {
   const source = active();
   if (!source || S.out - S.in < MIN_RANGE) return null;
+  clearWarning();
   const clip = {
     id: mintId('c'),
     sourceId: source.id,
@@ -990,7 +1012,6 @@ function renderTrack() {
   const rows = sequenceRows();
   const total = rows.length ? rows[rows.length - 1].end : 0;
   seqDurationEl.textContent = timecode(total);
-  seqExportBtn.disabled = !rows.length || S.exporting;
 
   if (trackShapeOf() === trackShape) return;
   trackShape = trackShapeOf();
@@ -1144,6 +1165,44 @@ track.addEventListener('dragleave', (event) => {
 
 track.addEventListener('pointerdown', () => setView('sequence'));
 
+/** A grain of whatever is under the sequence playhead, for scrub feedback. */
+async function scrubSequenceAudio(time) {
+  if (S.muted) return;
+  const at = performance.now();
+  if (at - lastGrain < GRAIN_GAP) return;
+  lastGrain = at;
+
+  const row = sequence.at(sequenceRows(), time);
+  const source = row && sourceById(row.item.sourceId);
+  if (!source) return;
+  await media.using(source, async (entry) => {
+    const sound = await media.audioOf(entry);
+    if (sound) await audio.scrub(sound.sink, sequence.sourceTime(row, time));
+  });
+}
+
+function scrubSequence(event) {
+  if (!S.timeline.length) return;
+  const time = seqTimeForX(event.clientX);
+  seekSequence(time).catch(fail);
+  scrubSequenceAudio(time).catch(fail);
+}
+
+seqRuler.addEventListener('pointerdown', (event) => {
+  if (!S.timeline.length) return;
+  event.preventDefault();
+  setView('sequence');
+  stopSequence();
+  capture(seqRuler, event.pointerId);
+  scrubSequence(event);
+});
+
+seqRuler.addEventListener('pointermove', (event) => {
+  if (seqRuler.hasPointerCapture(event.pointerId)) scrubSequence(event);
+});
+
+seqRuler.addEventListener('pointerup', () => audio.stopScrub());
+
 track.addEventListener('drop', (event) => {
   if (!event.dataTransfer.types.includes(DRAG_TYPE)) return;
   event.preventDefault();
@@ -1236,6 +1295,7 @@ export async function playSequence() {
             const at = origin + elapsed();
             S.seqPlayhead = Math.min(at, row.end);
             updateTransport();
+            updateSeqPlayhead();
             if (at >= row.end) break;
             await sleep(40);
           }
@@ -1254,6 +1314,7 @@ export async function playSequence() {
             painted = true;
             S.seqPlayhead = at;
             updateTransport();
+            updateSeqPlayhead();
           } finally {
             sample.close();
           }
@@ -1283,7 +1344,7 @@ export async function exportSequence() {
   S.exporting = true;
   stopSequence();
   pause();
-  seqExportBtn.disabled = true;
+  exportBtn.disabled = true;
 
   try {
     const rows = sequenceRows();
@@ -1298,11 +1359,10 @@ export async function exportSequence() {
     return blob;
   } finally {
     S.exporting = false;
-    renderTrack();
+    updateUI();
   }
 }
 
-seqExportBtn.addEventListener('click', () => exportSequence().catch(fail));
 
 // ─── Music bed ───────────────────────────────────────────────────────────────
 // One bed per project. It plays under the sequence only, not the source
@@ -1356,7 +1416,7 @@ function renderMusic() {
   musicTrack.width = Math.round(cssW * dpr);
   musicTrack.height = Math.round(height * dpr);
   mctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  mctx.fillStyle = '#12141a';
+  mctx.fillStyle = INK.lane;
   mctx.fillRect(0, 0, cssW, height);
 
   // Peaks are computed once for the widest window this display can produce,
@@ -1384,9 +1444,9 @@ function renderMusic() {
     // the current level.
     const full = Math.max(1, peak * room);
     const level = Math.max(1, peak * music.gain * room);
-    mctx.fillStyle = 'rgba(255, 77, 61, .22)';
+    mctx.fillStyle = `rgba(${INK.accent}, .22)`;
     mctx.fillRect(x, middle - full / 2, 1, full);
-    mctx.fillStyle = 'rgba(255, 77, 61, .85)';
+    mctx.fillStyle = `rgba(${INK.accent}, .9)`;
     mctx.fillRect(x, middle - level / 2, 1, level);
   }
 }
@@ -1565,6 +1625,7 @@ bindHandle(handleOut, 'out');
 playBtn.addEventListener('click', () => togglePlay());
 
 markInBtn.addEventListener('click', () => {
+  if (!requireSource()) return;
   S.in = clamp(S.playhead, 0, S.out - MIN_RANGE);
   updateRange();
   drawStrip();
@@ -1572,6 +1633,7 @@ markInBtn.addEventListener('click', () => {
 });
 
 markOutBtn.addEventListener('click', () => {
+  if (!requireSource()) return;
   S.out = clamp(S.playhead, S.in + MIN_RANGE, active()?.duration ?? 0);
   updateRange();
   drawStrip();
@@ -1622,11 +1684,11 @@ export async function exportRange() {
     return blob;
   } finally {
     S.exporting = false;
-    exportBtn.disabled = false;
+    updateUI();
   }
 }
 
-exportBtn.addEventListener('click', () => exportRange().catch(fail));
+exportBtn.addEventListener('click', () => exportShowing().catch(fail));
 
 /** Append the current in/out of the active source straight to the sequence. */
 export async function appendRange() {
@@ -1657,6 +1719,7 @@ export function setView(view) {
   pause();
   stopSequence();
   S.view = view;
+  if (view === 'source') clearWarning();
   updateUI();
   if (view === 'sequence') seekSequence(S.seqPlayhead).catch(fail);
   else seek(S.playhead).catch(fail);
@@ -1680,12 +1743,32 @@ function updateView() {
 let pendingSeqSeek = null;
 let seekingSeq = false;
 
+// The ruler spans exactly the items' area, so sequence time maps linearly onto
+// it: item widths are already proportional to their durations.
+const seqTotal = () => sequence.totalDuration(S.timeline);
+
+function seqTimeForX(clientX) {
+  const rect = seqRuler.getBoundingClientRect();
+  if (!rect.width) return 0;
+  return clamp(((clientX - rect.left) / rect.width) * seqTotal(), 0, seqTotal());
+}
+
+function updateSeqPlayhead() {
+  const total = seqTotal();
+  sequenceEl.classList.toggle('has-items', total > 0);
+  if (!total) return;
+  const rect = seqRuler.getBoundingClientRect();
+  const wrap = seqRuler.offsetLeft;
+  seqPlayheadEl.style.left = `${wrap + (S.seqPlayhead / total) * rect.width}px`;
+}
+
 /** Show a still of the sequence at a point on its own clock. */
 export async function seekSequence(time) {
   const rows = sequenceRows();
   const total = rows.length ? rows[rows.length - 1].end : 0;
   S.seqPlayhead = clamp(time, 0, total);
   updateTransport();
+  updateSeqPlayhead();
 
   const shape = sequenceShape(rows);
   // Assigning width clears the canvas even when the value is unchanged.
@@ -1724,6 +1807,42 @@ export async function seekSequence(time) {
   } finally {
     seekingSeq = false;
   }
+}
+
+// Things you tried to do that cannot work, said over the picture rather than
+// failing quietly. Borrowed from QCKSCRL.
+let warnTimer = 0;
+
+export function warn(title, message) {
+  warnTitle.textContent = title;
+  warnMsg.textContent = message;
+  warnToast.classList.add('visible');
+  clearTimeout(warnTimer);
+  warnTimer = setTimeout(() => warnToast.classList.remove('visible'), 4000);
+}
+
+export function clearWarning() {
+  clearTimeout(warnTimer);
+  warnToast.classList.remove('visible');
+}
+
+/**
+ * Marking cuts a range out of a source, so it needs a source on screen. Doing
+ * it from the sequence would silently cut from whichever source happened to be
+ * selected, which is not what the picture in front of you shows.
+ */
+function requireSource() {
+  if (S.view === 'source' && active()) return true;
+  warn('Showing the sequence',
+    active()
+      ? 'Clips are cut from a source. Click the filmstrip to go back to one.'
+      : 'Add a source first, then click its filmstrip.');
+  return false;
+}
+
+/** One export button for both, matching the play button. */
+export function exportShowing() {
+  return S.view === 'sequence' ? exportSequence() : exportRange();
 }
 
 /** One play button for both. */
@@ -1808,6 +1927,7 @@ window.addEventListener('resize', () => {
   updateMark();
   updateView();
   updateTransport();
+  updateSeqPlayhead();
   // Only devicePixelRatio can change what needs decoding (dragging to a
   // different-density display), and that is rare enough to settle for.
   clearTimeout(resizeTimer);
@@ -1911,7 +2031,7 @@ Object.assign(window, {
   renameSource, renameClip, renameItem, exportRange, buildStrip, queueStrip, drawStrip, stripsIdle,
   sequence, render, addToSequence, removeFromSequence, moveInSequence, selectItem,
   appendRange, playSequence, stopSequence, exportSequence, sequenceShape,
-  setView, seekSequence, togglePlay,
+  setView, seekSequence, togglePlay, seqTimeForX, exportShowing, warn, clearWarning,
   audio, setMusic, setMusicFromSource, removeMusic, setMusicGain, setMuted, setRate,
   timecode, parseTimecode, clamp, clipLabel, exportName, setClipRange,
 });

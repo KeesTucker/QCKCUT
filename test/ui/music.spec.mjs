@@ -89,9 +89,11 @@ test('the waveform is drawn from the decoded buffer', async ({ app }) => {
     const ctx = canvas.getContext('2d');
     const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
     let lit = 0;
-    // Count pixels that are not the lane background.
+    // Anything meaningfully brighter than the lane's dark ground is waveform.
+    // Deliberately not a channel test: the palette should be free to change.
     for (let i = 0; i < data.length; i += 4) {
-      if (data[i] > 60 && data[i + 1] < 90) lit++;
+      const luma = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
+      if (luma > 35) lit++;
     }
     return lit;
   });
@@ -251,8 +253,10 @@ test('the waveform is normalised and reflects the level', async ({ app }) => {
     for (let x = 0; x < width; x += 4) {
       let lit = 0;
       for (let y = 0; y < height; y++) {
+        const i = (y * width + x) * 4;
+        const luma = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
         // Only the solid bar, not the faint full-amplitude one behind it.
-        if (data[(y * width + x) * 4 + 3] > 0 && data[(y * width + x) * 4] > 120) lit++;
+        if (luma > 90) lit++;
       }
       tallest = Math.max(tallest, lit);
     }

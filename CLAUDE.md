@@ -19,7 +19,7 @@ Package manager is **pnpm** (pinned in `packageManager`).
 ```bash
 pnpm install
 pnpm dev              # Vite on http://localhost:5173
-pnpm test             # the gate: 150 Playwright tests in real Chrome
+pnpm test             # the gate: 163 Playwright tests in real Chrome
 pnpm build            # production bundle into dist/
 pnpm preview          # serve that bundle
 pnpm test:report      # open the HTML report
@@ -336,6 +336,14 @@ the failure: twice now the "flaky" test was reporting a real ordering bug.
   before its own `click` can land, so clicking a track item did nothing.
 - `syncClipRows()` skips a label that is being renamed, or it overwrites the
   caret.
+- The palette is shared with QCKSCRL (`--accent` #c084fc, `--accent2` #818cf8,
+  `--grad` between them). Canvas code cannot read CSS custom properties, so
+  `INK` in `app.js` mirrors it: keep the two in step.
+- Tests measure canvas colour by **brightness, not channel**, so the palette can
+  change without breaking them.
+- The empty-sequence hint is hidden by `.sequence.has-items .empty`, not an
+  adjacent-sibling rule: the playhead sits between the track and the hint, and
+  the sibling match broke silently when it was added.
 
 ## Sequence playback and pre-roll
 
@@ -363,6 +371,19 @@ item's** dimensions; anything shaped differently is letterboxed.
 says which. Touching the filmstrip makes it the source; touching the sequence
 track makes it the sequence; the active area gets a `watching` outline. One play
 button drives whichever is showing, so a press is never ambiguous.
+
+The sequence is scrubbed from a **ruler strip above the items**, not the items
+themselves: those are draggable for reordering, and the two gestures would
+fight. Sequence time maps linearly onto the ruler because item widths are
+already proportional to their durations.
+
+One export button too, labelled for what it will render: `Export clip` in source
+view, `Export sequence` in sequence view.
+
+Marking needs a source on screen, so `requireSource()` guards every route into
+it and raises a toast otherwise. Cutting from the sequence would silently take
+the range from whichever source happened to be selected, which is not what the
+picture in front of you shows.
 
 `seekSequence()` is **coalesced exactly like `seek()`**. `setView()` starts one
 without awaiting it, so an overlapping call is easy to produce, and without
