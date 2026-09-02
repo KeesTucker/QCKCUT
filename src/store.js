@@ -127,16 +127,34 @@ export const allClips = () => run('clips', 'readonly', (s) => s.getAll());
 
 // The sequence is stored whole rather than per item: its order *is* its
 // timing, so a partial write would be a reordered sequence.
-export async function putTimeline(items) {
+/**
+ * Every lane's items in one store, tagged with the lane they belong to. Order
+ * within a lane is its timing, so a partial write would be a reordered lane;
+ * the whole set is rewritten together.
+ *
+ * `trackId` of null is the video lane. Records written before lanes existed
+ * have no trackId at all, so old projects migrate by doing nothing.
+ */
+export async function putTimeline(lanes) {
   await run('timeline', 'readwrite', (s) => s.clear());
-  for (const [index, item] of items.entries()) {
-    await run('timeline', 'readwrite', (s) => s.put({ ...item, index }));
+  for (const { trackId, items } of lanes) {
+    for (const [index, item] of items.entries()) {
+      await run('timeline', 'readwrite', (s) => s.put({ ...item, index, trackId: trackId ?? null }));
+    }
   }
 }
 
+/** Items grouped by lane id, video under the null key. */
 export async function allTimeline() {
   const rows = await run('timeline', 'readonly', (s) => s.getAll());
-  return rows.sort((a, b) => a.index - b.index).map(({ index, ...item }) => item);
+  const lanes = new Map();
+  for (const row of rows.sort((a, b) => a.index - b.index)) {
+    const { index, trackId, ...item } = row;
+    const key = trackId ?? null;
+    if (!lanes.has(key)) lanes.set(key, []);
+    lanes.get(key).push(item);
+  }
+  return lanes;
 }
 
 // At most one music bed, so it is stored under a fixed key rather than by id.
@@ -160,6 +178,18 @@ const TRANSITIONS_KEY = 'transitions';
 
 export const putSettings = (settings) =>
   run('settings', 'readwrite', (s) => s.put({ ...settings, id: SETTINGS_KEY }));
+
+const TRACKS_KEY = 'tracks';
+
+// The lane list is stored separately so an empty lane survives a reload; it has
+// no items to be inferred from.
+export const putTracks = (ids) =>
+  run('settings', 'readwrite', (s) => s.put({ id: TRACKS_KEY, ids }));
+
+export async function getTracks() {
+  const row = await run('settings', 'readonly', (s) => s.get(TRACKS_KEY));
+  return Array.isArray(row?.ids) ? row.ids : null;
+}
 
 export const putTransitions = (value) =>
   run('settings', 'readwrite', (s) => s.put({ ...value, id: TRANSITIONS_KEY }));

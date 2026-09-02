@@ -169,3 +169,41 @@ test('starting a render clears the last cancellation notice', async ({ app }) =>
 
   await app.page.evaluate(() => { window.cancelExport(); return window.__again; });
 });
+
+// Regression: mixAudio was called with a signal it never declared, so a cancel
+// did nothing until the picture started. On a long sequence the mix is the slow
+// half, which is exactly when Cancel gets pressed.
+test('cancelling during the audio mix stops it there', async ({ app }) => {
+  test.setTimeout(120_000);
+  await app.add('tone');
+  await app.page.evaluate(async () => {
+    for (let i = 0; i < 6; i++) {
+      window.S.in = 0;
+      window.S.out = 4.8;
+      await window.appendRange();
+    }
+  });
+
+  const result = await app.page.evaluate(async () => {
+    let downloaded = false;
+    HTMLAnchorElement.prototype.click = function () { downloaded = true; };
+    const label = document.getElementById('exportLabel');
+    const running = window.exportShowing();
+
+    // Cancel while the label still says the mix is going.
+    let phase = null;
+    for (let i = 0; i < 200 && phase === null; i++) {
+      if (label.textContent.startsWith('Mixing audio')) phase = 'audio';
+      else if (label.textContent.startsWith('Rendering')) phase = 'video';
+      else await new Promise((r) => setTimeout(r, 5));
+    }
+    window.cancelExport();
+    const blob = await running;
+    return { blob, downloaded, phase };
+  });
+
+  expect(result.phase, 'the mix should be reported before the picture').toBe('audio');
+  expect(result.blob).toBeNull();
+  expect(result.downloaded).toBe(false);
+  await expect(app.page.locator('#warnTitle')).toHaveText('Render cancelled');
+});

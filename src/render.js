@@ -75,8 +75,9 @@ export async function renderClip(source, start, end, onProgress, settings = {}, 
  * with nothing to show for it, so the phase is reported rather than left to
  * look like a hang.
  */
-export async function renderSequence(rows, sourceOf, onProgress, music = null, shape = null, fps = null, signal, plan = null) {
-  if (!rows.length) throw new Error('the sequence is empty');
+export async function renderSequence(rows, sourceOf, onProgress, music = null, shape = null, fps = null, signal, plan = null, audioLanes = [], total = null) {
+  // Video rows can legitimately be empty: a sequence may be sound over black.
+  if (!rows.length && !(total > 0)) throw new Error('the sequence is empty');
   // The caller picks the shape, because the first item may be audio and have
   // no dimensions of its own.
   const size = shape ?? { width: sourceOf(rows[0].item)?.width, height: sourceOf(rows[0].item)?.height };
@@ -93,9 +94,12 @@ export async function renderSequence(rows, sourceOf, onProgress, music = null, s
 
   // Audio is mixed first: the track has to exist before the output starts, and
   // we only add one if at least one item actually has sound.
-  const total = rows[rows.length - 1].end;
+  // The sequence is as long as its longest lane, so the caller passes the
+  // length rather than it being read off the video rows.
+  const length = total ?? rows[rows.length - 1].end;
+  if (!(length > 0)) throw new Error('the sequence is empty');
   onProgress?.(0, 'audio');
-  const mixed = await mixAudio(rows, sourceOf, total, music, onProgress, signal);
+  const mixed = await mixAudio([rows, ...audioLanes], sourceOf, length, music, onProgress, signal);
   const audio = mixed ? new AudioBufferSource({ codec: 'aac', bitrate: QUALITY_HIGH }) : null;
   if (audio) output.addAudioTrack(audio);
 
@@ -107,7 +111,7 @@ export async function renderSequence(rows, sourceOf, onProgress, music = null, s
   onProgress?.(0, 'video');
 
   try {
-    await renderFrames({ rows, sourceOf, ctx, canvas, video, total, fps, onProgress, signal, plan });
+    await renderFrames({ rows, sourceOf, ctx, canvas, video, total: length, fps, onProgress, signal, plan });
   } catch (error) {
     // A started Output holds an encoder, so it has to be cancelled either way.
     await output.cancel().catch(() => {});
@@ -227,6 +231,23 @@ async function renderFrames({ rows, sourceOf, ctx, canvas, video, total, fps, on
     });
   }
 
+
+  // An audio lane can outrun the picture. The sequence keeps its full length,
+  // so the tail is black rather than the sound being cut off.
+  const pictureEnd = rows.length ? rows[rows.length - 1].end : 0;
+  if (total > pictureEnd + EPSILON) {
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    if (fps) {
+      for (let at = pictureEnd; at < total - EPSILON; at += 1 / fps) {
+        stopIf(signal);
+        await video.add(at, 1 / fps);
+      }
+    } else {
+      await video.add(pictureEnd, total - pictureEnd);
+    }
+    onProgress?.(1, 'video');
+  }
 }
 
 /**
@@ -238,7 +259,7 @@ async function renderFrames({ rows, sourceOf, ctx, canvas, video, total, fps, on
  *
  * Returns null when there is nothing to hear at all.
  */
-async function mixAudio(rows, sourceOf, total, music, onProgress) {
+async function mixAudio(lanes, sourceOf, total, music, onProgress, signal) {
   if (total <= 0) return null;
   const context = new OfflineAudioContext(
     AUDIO_CHANNELS, Math.ceil(total * AUDIO_RATE), AUDIO_RATE);
@@ -254,30 +275,19 @@ async function mixAudio(rows, sourceOf, total, music, onProgress) {
     node.start(0, 0, Math.min(music.buffer.duration, total));
   }
 
-  for (const row of rows) {
-    const source = sourceOf(row.item);
-    if (!source) continue;
-    await media.using(source, async ({ input }) => {
-      const track = await input.getPrimaryAudioTrack();
-      if (!track || !(await track.canDecode())) return;
-      found = true;
-
-      const sink = new AudioBufferSink(track);
-      for await (const { buffer, timestamp } of sink.buffers(row.item.in, row.item.out)) {
-        // Packet granularity means a buffer can start before the in point, so
-        // trim from the front rather than scheduling at a negative time.
-        const when = row.start + (timestamp - row.item.in);
-        const offset = when < 0 ? -when : 0;
-        const at = Math.max(0, when);
-        const room = Math.min(row.end, total) - at;
-        if (room <= 0 || offset >= buffer.duration) continue;
-
-        const node = context.createBufferSource();
-        node.buffer = buffer;
-        node.connect(context.destination);
-        node.start(at, offset, Math.min(buffer.duration - offset, room));
-      }
-    });
+  // Every lane is scheduled onto the same context: they are parallel, so their
+  // sound simply sums.
+  const steps = lanes.reduce((n, lane) => n + lane.length, 0) || 1;
+  let done = 0;
+  for (const lane of lanes) {
+    for (const row of lane) {
+      // The mix is the slow half on a long sequence, so a cancel has to land
+      // here too. It was previously handed a signal it never declared, so
+      // Cancel did nothing until the picture started.
+      stopIf(signal);
+      onProgress?.(done++ / steps, 'audio');
+      if (await scheduleRow(context, row, sourceOf, total)) found = true;
+    }
   }
 
   if (!found) return null;
@@ -285,6 +295,33 @@ async function mixAudio(rows, sourceOf, total, music, onProgress) {
   // nothing, so say what is happening before disappearing into it.
   onProgress?.(1, 'audio');
   return context.startRendering();
+}
+
+/** Schedule one item's audio at its place on the sequence clock. */
+async function scheduleRow(context, row, sourceOf, total) {
+  const source = sourceOf(row.item);
+  if (!source) return false;
+  return media.using(source, async ({ input }) => {
+    const track = await input.getPrimaryAudioTrack();
+    if (!track || !(await track.canDecode())) return false;
+
+    const sink = new AudioBufferSink(track);
+    for await (const { buffer, timestamp } of sink.buffers(row.item.in, row.item.out)) {
+      // Packet granularity means a buffer can start before the in point, so
+      // trim from the front rather than scheduling at a negative time.
+      const when = row.start + (timestamp - row.item.in);
+      const offset = when < 0 ? -when : 0;
+      const at = Math.max(0, when);
+      const room = Math.min(row.end, total) - at;
+      if (room <= 0 || offset >= buffer.duration) continue;
+
+      const node = context.createBufferSource();
+      node.buffer = buffer;
+      node.connect(context.destination);
+      node.start(at, offset, Math.min(buffer.duration - offset, room));
+    }
+    return true;
+  });
 }
 
 /** Hand a rendered blob to the browser as a download. */

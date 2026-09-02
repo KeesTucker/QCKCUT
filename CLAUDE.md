@@ -19,7 +19,7 @@ Package manager is **pnpm** (pinned in `packageManager`).
 ```bash
 pnpm install
 pnpm dev              # Vite on http://localhost:5173
-pnpm test             # the gate: 222 Playwright tests in real Chrome
+pnpm test             # the gate: 242 Playwright tests in real Chrome
 pnpm build            # production bundle into dist/
 pnpm preview          # serve that bundle
 pnpm test:report      # open the HTML report
@@ -149,6 +149,32 @@ Consequences worth knowing:
 
 `kind` is part of the stored record. It was not at first, and every restored
 source came back looking like audio, so no filmstrip ever built.
+
+### Lanes are parallel, and each is still index-packed
+
+```js
+S.timeline    = [...]                    // the video lane
+S.audioTracks = [{ id, items: [...] }]   // parallel lanes, same item shape
+```
+
+Every lane packs its own items end to end from zero, so **position is still the
+index** — no stored start times, no gaps, no overlaps, and rippling stays free.
+`sequence.js` is unchanged and simply called once per lane.
+
+`S.timeline` stays the video lane rather than becoming `tracks[0]`: it is
+referenced at ~40 sites and across the specs, and renaming it would have been
+churn for nothing.
+
+The sequence is **as long as its longest lane** (`seqTotal()`), not the video
+lane. Past the picture the render emits black so sound can play out over
+nothing, and playback keeps the playhead moving over it. Anything that asks "is
+there a sequence?" must use `seqTotal() > 0`, never `S.timeline.length`, or a
+sound-only sequence cannot play or export.
+
+Audio routes itself: an item whose source has no pictures goes to an audio lane
+whatever lane it was aimed at, creating one if the project has none
+(`laneFor()`). Dropping music on the picture lane put it *between* clips, which
+is the bug lanes exist to fix.
 
 ### The sequence stores order, not times
 

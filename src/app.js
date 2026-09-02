@@ -15,7 +15,8 @@ import * as store from './store.js';
 const S = {
   sources: [],      // { id, name, blob, duration, width, height, codec, thumbs, thumbCount, poster }
   clips: [],         // { id, sourceId, in, out, label }
-  timeline: [],     // { id, sourceId, in, out, label } — order is the timing
+  timeline: [],     // the video lane: { id, sourceId, in, out, label }, order is the timing
+  audioTracks: [],  // parallel lanes: { id, items: [...] }, each packed from zero
   music: null,      // { name, blob, buffer, peaks, gain, duration }
   activeId: null,
   activeClipId: null,
@@ -45,6 +46,21 @@ const clipsFor = (sourceId) => S.clips.filter((c) => c.sourceId === sourceId);
 const sourceById = (id) => S.sources.find((s) => s.id === id) ?? null;
 const sequenceRows = () => sequence.layout(S.timeline);
 
+// Lanes are independent: each packs its own items end to end from zero, so they
+// stay parallel without anything ever storing a start time.
+const audioRows = (track) => sequence.layout(track.items);
+const laneRows = () => [sequenceRows(), ...S.audioTracks.map(audioRows)];
+const laneEnd = (rows) => (rows.length ? rows[rows.length - 1].end : 0);
+const videoEnd = () => laneEnd(sequenceRows());
+const trackById = (id) => S.audioTracks.find((t) => t.id === id) ?? null;
+const itemsOf = (trackId) => (trackId ? trackById(trackId)?.items ?? [] : S.timeline);
+
+/** Persist every lane together: order within a lane is its timing. */
+const saveLanes = () => store.putTimeline([
+  { trackId: null, items: S.timeline },
+  ...S.audioTracks.map((t) => ({ trackId: t.id, items: t.items })),
+]);
+
 let nextId = 1;
 const mintId = (prefix) => `${prefix}${nextId++}`;
 
@@ -71,6 +87,8 @@ const addSourceBtn = $('addSource');
 const sourceList = $('sourceList');
 const clipList = $('clipList');
 const track = $('track');
+const audioLanes = $('audioLanes');
+const videoLane = $('videoLane');
 const seqDurationEl = $('seqDuration');
 const muteBtn = $('muteBtn');
 const rateSel = $('rateSel');
@@ -195,7 +213,7 @@ function clearPreview() {
  * holds its last frame indefinitely.
  */
 export async function refreshPreview() {
-  if (S.view === 'sequence' && S.timeline.length) return seekSequence(S.seqPlayhead);
+  if (S.view === 'sequence' && seqTotal() > 0) return seekSequence(S.seqPlayhead);
   if (S.view === 'source' && active() && held) return seek(S.playhead);
   clearPreview();
 }
@@ -503,8 +521,7 @@ const timeForX = (x) => (x / timeline.clientWidth) * (active()?.duration || 0);
 
 function updateTransport() {
   if (S.view === 'sequence') {
-    const total = sequence.totalDuration(S.timeline);
-    timeEl.textContent = `${timecode(S.seqPlayhead)} / ${timecode(total)}`;
+    timeEl.textContent = `${timecode(S.seqPlayhead)} / ${timecode(seqTotal())}`;
   } else {
     timeEl.textContent = `${timecode(S.playhead)} / ${timecode(active()?.duration ?? 0)}`;
   }
@@ -746,13 +763,13 @@ function field(label, commit) {
  * Items dragged straight from a source have no clipId and are never touched.
  */
 async function syncItemsFromClip(clip) {
-  const linked = S.timeline.filter((item) => item.clipId === clip.id);
+  const linked = allItems().filter((item) => item.clipId === clip.id);
   if (!linked.length) return false;
   for (const item of linked) {
     item.in = clip.in;
     item.out = clip.out;
   }
-  await store.putTimeline(S.timeline);
+  await saveLanes();
   return true;
 }
 
@@ -896,11 +913,11 @@ function updateUI() {
   controls.classList.toggle('hidden', !loaded && !S.timeline.length);
   for (const b of [markInBtn, markOutBtn]) b.disabled = !loaded;
 
-  playBtn.disabled = S.view === 'sequence' ? !S.timeline.length : !loaded;
+  playBtn.disabled = S.view === 'sequence' ? seqTotal() <= 0 : !loaded;
   updatePlayButton();
 
   // Export follows the sequence, not the view: see exportShowing().
-  const hasSequence = S.timeline.length > 0;
+  const hasSequence = seqTotal() > 0;
   if (S.exporting) {
     exportBtn.textContent = 'Cancel';
     exportBtn.title = 'Stop the render';
@@ -985,10 +1002,12 @@ export async function removeSource(id) {
   // points at a source.
   for (const clip of clipsFor(id)) await store.dropClip(clip.id);
   S.clips = S.clips.filter((c) => c.sourceId !== id);
-  if (S.timeline.some((item) => item.sourceId === id)) {
+  if (allItems().some((item) => item.sourceId === id)) {
     S.timeline = S.timeline.filter((item) => item.sourceId !== id);
+    S.audioTracks = S.audioTracks.map((t) =>
+      ({ ...t, items: t.items.filter((item) => item.sourceId !== id) }));
     S.seqPlayhead = 0;
-    await store.putTimeline(S.timeline);
+    await saveLanes();
   }
 
   if (S.activeId === id) {
@@ -1119,10 +1138,10 @@ export async function renameClip(id, label) {
 }
 
 export async function renameItem(id, label) {
-  const item = S.timeline.find((i) => i.id === id);
+  const item = allItems().find((i) => i.id === id);
   if (!item || !label) return null;
   item.label = label;
-  await store.putTimeline(S.timeline);
+  await saveLanes();
   updateUI();
   return item;
 }
@@ -1146,7 +1165,7 @@ function liveSyncActiveClip() {
   if (!clip) return null;
   clip.in = S.in;
   clip.out = S.out;
-  for (const item of S.timeline) {
+  for (const item of allItems()) {
     if (item.clipId === clip.id) {
       item.in = clip.in;
       item.out = clip.out;
@@ -1200,78 +1219,110 @@ let trackShape = null;
 // Durations are deliberately not part of the shape: they change continuously
 // while a trim handle is dragged, and rebuilding the track under the pointer
 // would be janky and pointless. syncTrackRows() moves them in place instead.
-let trackRows = new Map();
+// One cache per lane: the video lane keyed by null, audio lanes by their id.
+// Durations are deliberately not part of a lane's shape, since they change
+// continuously while a trim handle is dragged; syncLane() moves them in place.
+const laneCaches = new Map();
 
-const trackShapeOf = () => S.timeline
+const laneCache = (trackId) => {
+  const key = trackId ?? 'video';
+  if (!laneCaches.has(key)) laneCaches.set(key, { shape: null, rows: new Map() });
+  return laneCaches.get(key);
+};
+
+const laneShapeOf = (items) => items
   .map((i) => `${i.id}:${i.label}:${sourceById(i.sourceId)?.posterUrl ? 1 : 0}`)
   .join(',') + `|${S.activeItemId}`;
 
 function renderTrack() {
-  const rows = sequenceRows();
-  const total = rows.length ? rows[rows.length - 1].end : 0;
+  const total = seqTotal();
   seqDurationEl.textContent = timecode(total);
   // Set here, not in updateSeqPlayhead: without it the ruler is hidden, a
   // hidden element has no width, and the joints measure against the ruler.
-  sequenceEl.classList.toggle('has-items', rows.length > 0);
+  sequenceEl.classList.toggle('has-items', total > 0);
 
-  if (trackShapeOf() === trackShape) return syncTrackRows();
-  trackShape = trackShapeOf();
-  trackRows = new Map();
+  renderLane(track, null);
+  renderAudioLanes();
+}
 
-  track.replaceChildren(...rows.map((row) => {
-    const source = sourceById(row.item.sourceId);
-    const el = document.createElement('li');
-    const kinds = [media.isVideo(source) ? '' : ' audio', row.item.id === S.activeItemId ? ' active' : ''];
-    el.className = `track-item${kinds.join('')}`;
-    el.dataset.id = row.item.id;
-    el.dataset.index = String(row.index);
-    placeItem(el, row, total);
-    el.draggable = true;
-    if (source?.posterUrl) el.style.backgroundImage = `url(${source.posterUrl})`;
+/** Render one lane's items into its list element. */
+function renderLane(listEl, trackId) {
+  const items = itemsOf(trackId);
+  const rows = sequence.layout(items);
+  const total = seqTotal();
+  const cache = laneCache(trackId);
 
-    const name = document.createElement('div');
-    name.className = 'track-item-name';
-    name.textContent = row.item.label;
-    renameable(name, () => row.item.label, (next) => renameItem(row.item.id, next));
-    const time = document.createElement('div');
-    time.className = 'track-item-time';
-    time.textContent = timecode(row.duration);
+  if (laneShapeOf(items) === cache.shape) return syncLane(trackId);
+  cache.shape = laneShapeOf(items);
+  cache.rows = new Map();
 
-    const drop = document.createElement('button');
-    drop.className = 'track-item-drop';
-    drop.textContent = '\u00d7';
-    drop.title = 'Remove from sequence';
-    drop.addEventListener('click', (event) => {
-      event.stopPropagation();
-      removeFromSequence(row.item.id).catch(fail);
-    });
+  listEl.replaceChildren(...rows.map((row) => buildItem(row, trackId, total, cache)));
+}
 
-    el.append(name, time, drop);
-    trackRows.set(row.item.id, { el, name, time });
-    el.addEventListener('click', () => selectItem(row.item.id).catch(fail));
-    el.addEventListener('dragstart', (event) => {
-      event.dataTransfer.setData(DRAG_TYPE, JSON.stringify({ kind: 'item', index: row.index }));
-      event.dataTransfer.effectAllowed = 'move';
-      el.classList.add('dragging');
-    });
-    el.addEventListener('dragend', () => {
-      el.classList.remove('dragging');
-      clearDropMarks();
-    });
-    return el;
-  }));
+function buildItem(row, trackId, total, cache) {
+  const source = sourceById(row.item.sourceId);
+  const el = document.createElement('li');
+  const audioLane = trackId !== null;
+  const kinds = [
+    audioLane || !media.isVideo(source) ? ' audio' : '',
+    row.item.id === S.activeItemId ? ' active' : '',
+  ];
+  el.className = `track-item${kinds.join('')}`;
+  el.dataset.id = row.item.id;
+  el.dataset.index = String(row.index);
+  placeItem(el, row, total);
+  el.draggable = true;
+  // An audio lane uses only sound, so a poster there would be a lie.
+  if (!audioLane && source?.posterUrl) el.style.backgroundImage = `url(${source.posterUrl})`;
+
+  const name = document.createElement('div');
+  name.className = 'track-item-name';
+  name.textContent = row.item.label;
+  renameable(name, () => row.item.label, (next) => renameItem(row.item.id, next));
+  const time = document.createElement('div');
+  time.className = 'track-item-time';
+  time.textContent = timecode(row.duration);
+
+  const drop = document.createElement('button');
+  drop.className = 'track-item-drop';
+  drop.textContent = '\u00d7';
+  drop.title = 'Remove from sequence';
+  drop.addEventListener('click', (event) => {
+    event.stopPropagation();
+    removeFromSequence(row.item.id).catch(fail);
+  });
+
+  el.append(name, time, drop);
+  cache.rows.set(row.item.id, { el, name, time });
+  el.addEventListener('click', () => selectItem(row.item.id).catch(fail));
+  el.addEventListener('dragstart', (event) => {
+    event.dataTransfer.setData(DRAG_TYPE, JSON.stringify({ kind: 'item', index: row.index, trackId }));
+    event.dataTransfer.effectAllowed = 'move';
+    el.classList.add('dragging');
+  });
+  el.addEventListener('dragend', () => {
+    el.classList.remove('dragging');
+    clearDropMarks();
+  });
+  return el;
 }
 
 /** Widths and durations only, so a trim can move them without a rebuild. */
-function syncTrackRows() {
-  const rows = sequenceRows();
-  const total = rows.length ? rows[rows.length - 1].end : 0;
-  for (const row of rows) {
-    const parts = trackRows.get(row.item.id);
+function syncLane(trackId) {
+  const cache = laneCache(trackId);
+  const total = seqTotal();
+  for (const row of sequence.layout(itemsOf(trackId))) {
+    const parts = cache.rows.get(row.item.id);
     if (!parts) continue;
     placeItem(parts.el, row, total);
     parts.time.textContent = timecode(row.duration);
   }
+}
+
+/** Every lane gets its widths refreshed: they share one time axis. */
+function syncTrackRows() {
+  syncLane(null);
+  for (const t of S.audioTracks) syncLane(t.id);
 }
 
 /**
@@ -1286,7 +1337,70 @@ function placeItem(el, row, total) {
   el.style.width = `${(row.duration / total) * 100}%`;
 }
 
-/** Build a timeline item from a clip, or from a whole source. */
+// ─── Audio lanes ─────────────────────────────────────────────────────────────
+// Parallel to the video lane and to each other. Each packs its own items from
+// zero, so nothing needs a start time and nothing can overlap.
+
+// null rather than '': an empty lane list also stringifies to '', so a dataset
+// comparison could not tell "no lanes yet" from "lanes just cleared", and the
+// old lane DOM survived a project switch.
+let audioLanesShape = null;
+
+function renderAudioLanes() {
+  const wanted = S.audioTracks.map((t) => t.id).join(',');
+  if (audioLanesShape !== wanted) {
+    audioLanesShape = wanted;
+    audioLanes.replaceChildren(...S.audioTracks.map(buildAudioLane));
+  }
+  for (const t of S.audioTracks) {
+    const list = audioLanes.querySelector(`ol[data-track="${t.id}"]`);
+    if (list) renderLane(list, t.id);
+  }
+}
+
+function buildAudioLane(trackItem) {
+  const lane = document.createElement('div');
+  lane.className = 'audio-lane';
+
+  const list = document.createElement('ol');
+  list.className = 'track audio';
+  list.dataset.track = trackItem.id;
+
+  const hint = document.createElement('p');
+  hint.className = 'empty-lane';
+  hint.textContent = 'Drag audio here';
+
+  const remove = document.createElement('button');
+  remove.className = 'lane-drop';
+  remove.textContent = '\u00d7';
+  remove.title = 'Remove this audio track';
+  remove.addEventListener('click', () => removeAudioTrack(trackItem.id).catch(fail));
+
+  lane.append(list, hint, remove);
+  bindLaneDrops(list, trackItem.id);
+  return lane;
+}
+
+export async function addAudioTrack() {
+  const trackItem = { id: mintId('at'), items: [] };
+  S.audioTracks = [...S.audioTracks, trackItem];
+  await store.putTracks(S.audioTracks.map((t) => t.id));
+  updateUI();
+  return trackItem;
+}
+
+export async function removeAudioTrack(id) {
+  S.audioTracks = S.audioTracks.filter((t) => t.id !== id);
+  laneCaches.delete(id);
+  await store.putTracks(S.audioTracks.map((t) => t.id));
+  await saveLanes();
+  updateUI();
+  await refreshPreview();
+}
+
+$('addAudioTrack').addEventListener('click', () => addAudioTrack().catch(fail));
+
+/** Build a timeline item from a clip, or from a whole source. *//** Build a timeline item from a clip, or from a whole source. */
 function itemFrom(kind, id) {
   if (kind === 'clip') {
     const clip = S.clips.find((c) => c.id === id);
@@ -1312,34 +1426,70 @@ function itemFrom(kind, id) {
   };
 }
 
-export async function addToSequence(kind, id, index = S.timeline.length) {
+export async function addToSequence(kind, id, index = S.timeline.length, trackId = null) {
   const item = itemFrom(kind, id);
   if (!item) return null;
-  S.timeline = sequence.insert(S.timeline, item, index);
+
+  // Sound dropped on the picture lane would sit *between* clips rather than
+  // under them, which is never what was meant. It gets a lane of its own,
+  // created on the spot if the project has none yet.
+  const lane = await laneFor(item, trackId);
+  const at = lane === trackId ? index : itemsOf(lane).length;
+  setLaneItems(lane, sequence.insert(itemsOf(lane), item, at));
   S.activeItemId = item.id;
   updateUI();
-  await store.putTimeline(S.timeline);
+  await saveLanes();
   return item;
 }
 
+/**
+ * Where an item should actually go. Anything without pictures belongs on an
+ * audio lane, whichever lane it was aimed at.
+ */
+async function laneFor(item, trackId) {
+  if (trackId) return trackId;
+  if (media.isVideo(sourceById(item.sourceId))) return null;
+  return S.audioTracks[0]?.id ?? (await addAudioTrack()).id;
+}
+
+/** Write a lane's items back, whichever lane it is. */
+function setLaneItems(trackId, items) {
+  if (!trackId) {
+    S.timeline = items;
+    return;
+  }
+  S.audioTracks = S.audioTracks.map((t) => (t.id === trackId ? { ...t, items } : t));
+}
+
+/** Which lane an item lives on, or null for the video lane. */
+function laneOf(itemId) {
+  if (S.timeline.some((i) => i.id === itemId)) return null;
+  return S.audioTracks.find((t) => t.items.some((i) => i.id === itemId))?.id ?? null;
+}
+
+/** Every item on every lane, for lookups that do not care where it sits. */
+const allItems = () => [...S.timeline, ...S.audioTracks.flatMap((t) => t.items)];
+
 export async function removeFromSequence(id) {
-  S.timeline = sequence.remove(S.timeline, id);
+  const trackId = laneOf(id);
+  setLaneItems(trackId, sequence.remove(itemsOf(trackId), id));
   if (S.activeItemId === id) S.activeItemId = null;
   S.seqPlayhead = 0;
   updateUI();
-  await store.putTimeline(S.timeline);
+  await saveLanes();
+  await refreshPreview();
 }
 
-export async function moveInSequence(from, to) {
-  S.timeline = sequence.move(S.timeline, from, to);
+export async function moveInSequence(from, to, trackId = null) {
+  setLaneItems(trackId, sequence.move(itemsOf(trackId), from, to));
   updateUI();
-  await store.putTimeline(S.timeline);
+  await saveLanes();
 }
 
 /** Jump the preview to a sequence item's first frame. */
 export async function selectItem(id) {
-  const rows = sequenceRows();
-  const row = rows.find((r) => r.item.id === id);
+  const trackId = laneOf(id);
+  const row = sequence.layout(itemsOf(trackId)).find((r) => r.item.id === id);
   if (!row) return;
   pause();
   stopSequence();
@@ -1372,42 +1522,84 @@ const dropPayload = (event) => {
 };
 
 function clearDropMarks() {
-  track.classList.remove('over');
-  for (const el of track.children) el.classList.remove('drop-before', 'drop-after');
+  for (const list of [track, ...audioLanes.querySelectorAll('ol.track')]) {
+    list.classList.remove('over');
+    for (const el of list.children) el.classList.remove('drop-before', 'drop-after');
+  }
 }
 
-/** Which insertion slot the pointer is over, 0..length. */
-function slotFor(event) {
-  const bounds = [...track.children].map((el) => {
+/** Which insertion slot the pointer is over in this lane, 0..length. */
+function slotFor(listEl, event) {
+  const bounds = [...listEl.children].map((el) => {
     const r = el.getBoundingClientRect();
     return { left: r.left, right: r.right };
   });
   return sequence.slotAt(bounds, event.clientX);
 }
 
-function markSlot(slot) {
-  const children = [...track.children];
+function markSlot(listEl, slot) {
+  const children = [...listEl.children];
   for (const el of children) el.classList.remove('drop-before', 'drop-after');
   if (!children.length) return;
   if (slot >= children.length) children[children.length - 1].classList.add('drop-after');
   else children[slot].classList.add('drop-before');
 }
 
-for (const type of ['dragenter', 'dragover']) {
-  track.addEventListener(type, (event) => {
+/**
+ * Wire one lane as a drop target. Lanes accept the same payloads; an item
+ * dragged from another lane moves across rather than being copied.
+ */
+function bindLaneDrops(listEl, trackId) {
+  for (const type of ['dragenter', 'dragover']) {
+    listEl.addEventListener(type, (event) => {
+      if (!event.dataTransfer.types.includes(DRAG_TYPE)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      listEl.classList.add('over');
+      markSlot(listEl, slotFor(listEl, event));
+    });
+  }
+
+  listEl.addEventListener('dragleave', (event) => {
+    if (!listEl.contains(event.relatedTarget)) clearDropMarks();
+  });
+
+  listEl.addEventListener('drop', (event) => {
     if (!event.dataTransfer.types.includes(DRAG_TYPE)) return;
     event.preventDefault();
     event.stopPropagation();
-    track.classList.add('over');
-    markSlot(slotFor(event));
+    const slot = slotFor(listEl, event);
+    const payload = dropPayload(event);
+    clearDropMarks();
+    if (!payload) return;
+
+    if (payload.kind !== 'item') {
+      addToSequence(payload.kind, payload.id, slot, trackId).catch(fail);
+      return;
+    }
+    const from = payload.trackId ?? null;
+    if (from === trackId) moveInSequence(payload.index, slot, trackId).catch(fail);
+    else moveBetweenLanes(from, payload.index, trackId, slot).catch(fail);
   });
+
+  listEl.addEventListener('pointerdown', () => setView('sequence'));
 }
 
-track.addEventListener('dragleave', (event) => {
-  if (!track.contains(event.relatedTarget)) clearDropMarks();
-});
+/** Carry an item from one lane to another, keeping its range and label. */
+export async function moveBetweenLanes(fromTrack, index, toTrack, slot) {
+  const source = itemsOf(fromTrack);
+  const item = source[index];
+  if (!item) return null;
+  setLaneItems(fromTrack, source.filter((_, i) => i !== index));
+  setLaneItems(toTrack, sequence.insert(itemsOf(toTrack), item, slot));
+  S.activeItemId = item.id;
+  updateUI();
+  await saveLanes();
+  await refreshPreview();
+  return item;
+}
 
-track.addEventListener('pointerdown', () => setView('sequence'));
+bindLaneDrops(track, null);
 
 /** A grain of whatever is under the sequence playhead, for scrub feedback. */
 async function scrubSequenceAudio(time) {
@@ -1426,14 +1618,14 @@ async function scrubSequenceAudio(time) {
 }
 
 function scrubSequence(event) {
-  if (!S.timeline.length) return;
+  if (seqTotal() <= 0) return;
   const time = seqTimeForX(event.clientX);
   seekSequence(time).catch(fail);
   scrubSequenceAudio(time).catch(fail);
 }
 
 seqRuler.addEventListener('pointerdown', (event) => {
-  if (!S.timeline.length) return;
+  if (seqTotal() <= 0) return;
   event.preventDefault();
   setView('sequence');
   stopSequence();
@@ -1446,18 +1638,6 @@ seqRuler.addEventListener('pointermove', (event) => {
 });
 
 seqRuler.addEventListener('pointerup', () => audio.stopScrub());
-
-track.addEventListener('drop', (event) => {
-  if (!event.dataTransfer.types.includes(DRAG_TYPE)) return;
-  event.preventDefault();
-  event.stopPropagation();
-  const slot = slotFor(event);
-  const payload = dropPayload(event);
-  clearDropMarks();
-  if (!payload) return;
-  if (payload.kind === 'item') moveInSequence(payload.index, slot).catch(fail);
-  else addToSequence(payload.kind, payload.id, slot).catch(fail);
-});
 
 // Playback across the whole sequence.
 
@@ -1477,13 +1657,14 @@ function preroll(row) {
 }
 
 export async function playSequence() {
-  if (S.playingSeq || !S.timeline.length) return;
+  // Any lane counts: a sequence can be sound over black.
+  if (S.playingSeq || seqTotal() <= 0) return;
   pause();
   S.playingSeq = true;
   updatePlayButton();
 
   const rows = sequenceRows();
-  const total = rows[rows.length - 1].end;
+  const total = seqTotal();
   if (S.seqPlayhead >= total - 0.02) S.seqPlayhead = 0;
 
   // The preview takes the sequence's own dimensions; items shaped differently
@@ -1503,7 +1684,12 @@ export async function playSequence() {
   const ctx = audio.unlock();
   const startAt = ctx.currentTime + 0.06;
   const elapsed = S.muted ? audio.wallClock(rate) : audio.audioClock(startAt, rate);
-  if (!S.muted) startMusic(startAt, origin, total - origin, rate);
+  if (!S.muted) {
+    startMusic(startAt, origin, total - origin, rate);
+    // Audio lanes are parallel to the picture, so they are scheduled once here
+    // rather than item by item as the video loop walks the cuts.
+    for (const lane of S.audioTracks) scheduleLane(lane, origin, startAt, rate, stopping.signal);
+  }
 
   let painted = false;
   try {
@@ -1570,11 +1756,47 @@ export async function playSequence() {
         media.release(source.id);
       }
     }
+    // The picture can run out before the sequence does. Keep the playhead
+    // moving over black so the audio lanes are heard to their end.
+    const pictureEnd = videoEnd();
+    if (S.playingSeq && total > pictureEnd) {
+      paintSilence('');
+      while (S.playingSeq) {
+        const at = origin + elapsed();
+        S.seqPlayhead = Math.min(at, total);
+        updateTransport();
+        updateSeqPlayhead();
+        if (at >= total) break;
+        await sleep(40);
+      }
+    }
   } finally {
     stopping.abort();
     if (seqRun === stopping) seqRun = null;
     if (S.playingSeq) S.seqPlayhead = total;
     stopSequence();
+  }
+}
+
+/** Put one audio lane's items on the clock, from the playhead onwards. */
+function scheduleLane(lane, origin, startAt, rate, signal) {
+  for (const row of audioRows(lane)) {
+    if (row.end <= origin) continue;
+    const source = sourceById(row.item.sourceId);
+    if (!source) continue;
+    const from = row.item.in + Math.max(0, origin - row.start);
+    media.using(source, async (entry) => {
+      const sound = await media.audioOf(entry);
+      if (!sound) return;
+      await audio.schedule({
+        sink: sound.sink,
+        from,
+        to: row.item.out,
+        startAt: startAt + (Math.max(origin, row.start) - origin) / rate,
+        signal,
+        rate,
+      });
+    }).catch(fail);
   }
 }
 
@@ -1588,7 +1810,7 @@ export function stopSequence() {
 }
 
 export async function exportSequence() {
-  if (S.exporting || !S.timeline.length) return null;
+  if (S.exporting || seqTotal() <= 0) return null;
   S.exporting = true;
   stopSequence();
   pause();
@@ -1603,10 +1825,10 @@ export async function exportSequence() {
     const started = performance.now();
     const blob = await render.renderSequence(rows, (item) => sourceById(item.sourceId),
       showProgress, S.music, outputShape(rows), S.settings.fps, run.signal,
-      transitionPlan());
+      transitionPlan(), S.audioTracks.map(audioRows), seqTotal());
     const took = (performance.now() - started) / 1000;
     render.download(blob, 'sequence.mp4');
-    const total = rows[rows.length - 1].end;
+    const total = seqTotal();
     setStatus(`rendered ${(blob.size / 1e6).toFixed(1)} MB in ${took.toFixed(1)}s (${(total / took).toFixed(1)}\u00d7)`);
     return blob;
   } catch (error) {
@@ -1646,7 +1868,7 @@ export async function setTransition(boundary, type, duration) {
     const item = S.timeline.find((i) => i.id === boundary.itemId);
     if (!item) return null;
     item.transition = value;
-    await store.putTimeline(S.timeline);
+    await saveLanes();
   } else {
     S.transitions = { ...S.transitions, [boundary.kind]: value };
     await store.putTransitions(S.transitions);
@@ -2083,12 +2305,13 @@ export async function appendRange() {
     sourceId: source.id,
     in: S.in,
     out: S.out,
-    label: clipLabel(source.name, S.timeline.filter((i) => i.sourceId === source.id).length),
+    label: clipLabel(source.name, allItems().filter((i) => i.sourceId === source.id).length),
   };
-  S.timeline = sequence.insert(S.timeline, item, S.timeline.length);
+  const lane = await laneFor(item, null);
+  setLaneItems(lane, sequence.insert(itemsOf(lane), item, itemsOf(lane).length));
   S.activeItemId = item.id;
   updateUI();
-  await store.putTimeline(S.timeline);
+  await saveLanes();
   return item;
 }
 
@@ -2132,7 +2355,9 @@ let seqSeekLoop = null;
 
 // The ruler spans exactly the items' area, so sequence time maps linearly onto
 // it: item widths are already proportional to their durations.
-const seqTotal = () => sequence.totalDuration(S.timeline);
+// The sequence is as long as its longest lane. Past the video lane the picture
+// is black, so music can play out over nothing.
+const seqTotal = () => Math.max(0, ...laneRows().map(laneEnd));
 
 function seqTimeForX(clientX) {
   const rect = seqRuler.getBoundingClientRect();
@@ -2277,7 +2502,7 @@ export function cancelExport() {
  */
 export function exportShowing() {
   if (S.exporting) return cancelExport();
-  return S.timeline.length ? exportSequence() : exportRange();
+  return seqTotal() > 0 ? exportSequence() : exportRange();
 }
 
 /** One play button for both. */
@@ -2389,6 +2614,7 @@ function forgetProject() {
     activeId: null, activeClipId: null, activeItemId: null,
     playhead: 0, in: 0, out: 0, seqPlayhead: 0, marking: null,
     view: 'source',
+    audioTracks: [],
     settings: { width: null, height: null, fps: null },
     transitions: { intro: null, outro: null },
     boundary: null,
@@ -2399,6 +2625,8 @@ function forgetProject() {
   trackShape = null;
   sourcesShape = null;
   sourceRows = new Map();
+  laneCaches.clear();
+  audioLanesShape = null;
   stripQueued.clear();
   nextId = 1;
 
@@ -2533,8 +2761,9 @@ export function outputShape(rows) {
 
 /** Restore the project from IndexedDB. */
 export async function restore() {
-  const [sources, clips, timeline, music] = await Promise.all([
-    store.allSources(), store.allClips(), store.allTimeline(), store.getMusic(),
+  const [sources, clips, lanes, trackIds, music] = await Promise.all([
+    store.allSources(), store.allClips(), store.allTimeline(), store.getTracks(),
+    store.getMusic(),
   ]);
   if (music) {
     // The decoded buffer and its peaks are rebuilt; neither is storable.
@@ -2560,10 +2789,17 @@ export async function restore() {
     loudest: 1,
   }));
   S.clips = clips.filter((c) => known(c.sourceId));
-  S.timeline = timeline.filter((i) => known(i.sourceId));
+  S.timeline = (lanes.get(null) ?? []).filter((i) => known(i.sourceId));
+  // The lane list is stored separately so an empty lane survives; fall back to
+  // whatever lanes the items themselves mention.
+  const ids = trackIds ?? [...lanes.keys()].filter(Boolean);
+  S.audioTracks = ids.map((id) => ({
+    id,
+    items: (lanes.get(id) ?? []).filter((i) => known(i.sourceId)),
+  }));
   // Ids are minted from a counter, so continue past whatever was restored.
-  nextId = Math.max(0, ...[...S.sources, ...S.clips, ...S.timeline]
-    .map((r) => Number(String(r.id).slice(1)) || 0)) + 1;
+  nextId = Math.max(0, ...[...S.sources, ...S.clips, ...allItems(), ...S.audioTracks]
+    .map((r) => Number(String(r.id).replace(/^[a-z]+/, '')) || 0)) + 1;
   await setActive(S.sources[0].id);
   for (const source of S.sources) queueStrip(source);
 }
@@ -2590,7 +2826,13 @@ export function snapshot() {
     clips: S.clips.map((c) => ({ ...c })),
     timeline: sequenceRows().map(({ item, index, start, duration, end }) =>
       ({ ...item, index, start, duration, end })),
-    sequenceDuration: sequence.totalDuration(S.timeline),
+    audioTracks: S.audioTracks.map((t) => ({
+      id: t.id,
+      items: audioRows(t).map(({ item, index, start, duration, end }) =>
+        ({ ...item, index, start, duration, end })),
+    })),
+    sequenceDuration: seqTotal(),
+    videoDuration: videoEnd(),
     activeId: S.activeId,
     activeClipId: S.activeClipId,
     activeItemId: S.activeItemId,
@@ -2644,6 +2886,7 @@ Object.assign(window, {
   setView, seekSequence, togglePlay, seqTimeForX, exportShowing, warn, clearWarning,
   boot, openProject, newProject, renameProject, dropProject, setSettings, outputShape,
   cancelExport, transitions, transitionAt, setTransition, selectBoundary,
+  addAudioTrack, removeAudioTrack, moveBetweenLanes,
   liveSyncActiveClip,
   refreshPreview,
   audio, setMusic, setMusicFromSource, removeMusic, setMusicGain, setMuted, setRate,

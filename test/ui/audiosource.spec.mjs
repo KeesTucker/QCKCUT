@@ -70,7 +70,7 @@ test('an audio source can be clipped like any other', async ({ app }) => {
   expect(s.clips[0].out).toBeCloseTo(4, 1);
 });
 
-test('an audio clip can go on the sequence', async ({ app }) => {
+test('an audio clip goes to an audio lane, not between the pictures', async ({ app }) => {
   await addAudio(app);
   await app.page.evaluate(async () => {
     window.S.in = 1;
@@ -78,8 +78,12 @@ test('an audio clip can go on the sequence', async ({ app }) => {
     await window.appendRange();
   });
 
-  await expect(app.page.locator('#track .track-item.audio')).toHaveCount(1);
+  // A lane is made for it rather than it landing on the picture track.
+  await expect(app.page.locator('#track .track-item')).toHaveCount(0);
+  await expect(app.page.locator('#audioLanes .track-item')).toHaveCount(1);
   const s = await app.state();
+  expect(s.timeline).toHaveLength(0);
+  expect(s.audioTracks[0].items).toHaveLength(1);
   expect(s.sequenceDuration).toBeCloseTo(2, 2);
 });
 
@@ -119,22 +123,27 @@ test('a sequence of only audio still has a size', async ({ app }) => {
   expect(shape).toEqual({ width: 1280, height: 720 });
 });
 
-test('sequence playback crosses from video into audio', async ({ app }) => {
+test('playback runs the whole sequence when audio outlasts the picture', async ({ app }) => {
   await app.add('land');
   await addAudio(app);
   await app.page.evaluate(async () => {
     const video = window.S.sources.find((s) => s.kind === 'video');
     await window.setActive(video.id);
     window.S.in = 0;
-    window.S.out = 0.8;
+    window.S.out = 0.5;
     await window.appendRange();
 
+    // Lands on its own lane, running past the picture.
     const sound = window.S.sources.find((s) => s.kind === 'audio');
     await window.setActive(sound.id);
     window.S.in = 0;
-    window.S.out = 0.8;
+    window.S.out = 1.4;
     await window.appendRange();
   });
+
+  const s = await app.state();
+  expect(s.videoDuration).toBeCloseTo(0.5, 1);
+  expect(s.sequenceDuration).toBeCloseTo(1.4, 1);
 
   const result = await app.page.evaluate(async () => {
     let error = null;
@@ -142,10 +151,13 @@ test('sequence playback crosses from video into audio', async ({ app }) => {
     return { error, head: window.S.seqPlayhead };
   });
   expect(result.error).toBeNull();
-  expect(result.head).toBeCloseTo(1.6, 1);
+  // Past the picture, over black, to the end of the sound.
+  expect(result.head).toBeCloseTo(1.4, 1);
 });
 
-test('an audio item renders as black and keeps its place in the export', async ({ app }) => {
+// Audio routes itself to a lane, but an item can still be dragged onto the
+// picture lane by hand, and there it has to hold its time as black.
+test('an audio item on the picture lane renders as black and keeps its place', async ({ app }) => {
   test.setTimeout(120_000);
   await app.add('land');
   await addAudio(app);
@@ -161,6 +173,10 @@ test('an audio item renders as black and keeps its place in the export', async (
     window.S.in = 0;
     window.S.out = 1;
     await window.appendRange();
+
+    // Drag it out of its lane and onto the picture, after the video item.
+    const lane = window.S.audioTracks[0].id;
+    await window.moveBetweenLanes(lane, 0, null, 1);
   });
 
   const result = await app.page.evaluate(async () => {
