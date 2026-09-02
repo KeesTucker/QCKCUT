@@ -1,6 +1,7 @@
 import * as audio from './audio.js';
 import * as media from './media.js';
 import * as render from './render.js';
+import * as frame from './frame.js';
 import * as sequence from './sequence.js';
 import * as transitions from './transitions.js';
 import * as store from './store.js';
@@ -34,7 +35,7 @@ const S = {
   rate: 1,          // preview speed; never affects the export
   view: 'source',   // which of the two things the viewer is showing
   project: null,    // { id, name }
-  settings: { width: null, height: null, fps: null },   // null means match the source
+  settings: { width: null, height: null, fps: null, fit: 'contain' },   // null means match the source
   transitions: { intro: null, outro: null },            // the sequence's own ends
   boundary: null,   // which joint the Effects panel is showing
 };
@@ -130,6 +131,12 @@ const clipAudioBox = $('clipAudioBox');
 const itemMute = $('itemMute');
 const itemGain = $('itemGain');
 const itemGainValue = $('itemGainValue');
+const itemRotate = $('itemRotate');
+const itemRotateValue = $('itemRotateValue');
+const itemZoom = $('itemZoom');
+const itemZoomValue = $('itemZoomValue');
+const itemFrameReset = $('itemFrameReset');
+const fitSel = $('fitSel');
 const musicGainWrap = $('musicGainWrap');
 const musicGain = $('musicGain');
 const musicName = $('musicName');
@@ -195,10 +202,13 @@ const INK = {
   accent2: '129, 140, 248',   // --accent2 #818cf8
 };
 
-function paint(sample, dim = 0) {
+function paint(sample, dim = 0, item = null) {
   pctx.fillStyle = '#000';
   pctx.fillRect(0, 0, preview.width, preview.height);
-  sample.drawWithFit(pctx, { fit: 'contain' });
+  const source = item && sourceById(item.sourceId);
+  sample.drawWithFit(pctx, source
+    ? render.placement(item, source, preview, S.settings.fit)
+    : { fit: 'contain' });
   // The same darkening the render applies, from the same function, so the
   // preview cannot disagree with the file about what a transition looks like.
   if (dim > 0) {
@@ -1406,6 +1416,10 @@ function renderAudioLanes() {
   const wanted = S.audioTracks.map((t) => t.id).join(',');
   if (audioLanesShape !== wanted) {
     audioLanesShape = wanted;
+    // Every lane's list element is recreated here, so the per-lane caches now
+    // describe detached nodes. Left alone they report "already rendered" and
+    // sync the old DOM, and the new lists stay empty.
+    for (const t of S.audioTracks) laneCaches.delete(t.id);
     audioLanes.replaceChildren(...S.audioTracks.map(buildAudioLane));
   }
   for (const t of S.audioTracks) {
@@ -1827,7 +1841,7 @@ export async function playSequence() {
             if (wait < -50 && painted) continue;
             if (wait > 0) await sleep(wait);
             if (!live()) break;
-            paint(sample, transitions.dimAt(at, transitionPlan()));
+            paint(sample, transitions.dimAt(at, transitionPlan()), row.item);
             painted = true;
             S.seqPlayhead = at;
             updateTransport();
@@ -1915,7 +1929,7 @@ export async function exportSequence() {
     const started = performance.now();
     const blob = await render.renderSequence(rows, (item) => sourceById(item.sourceId),
       showProgress, S.music, outputShape(rows), S.settings.fps, run.signal,
-      transitionPlan(), S.audioTracks.map(audioRows), seqTotal());
+      transitionPlan(), S.audioTracks.map(audioRows), seqTotal(), S.settings);
     const took = (performance.now() - started) / 1000;
     render.download(blob, 'sequence.mp4');
     const total = seqTotal();
@@ -2000,7 +2014,10 @@ function renderEffects() {
     effectWhere.textContent = item ? item.label : 'Nothing selected';
     effectAt.textContent = item ? timecode(itemDuration(item)) : '';
     effectDurationWrap.hidden = true;
-    if (item) renderItemAudio(item);
+    if (item) {
+    renderItemAudio(item);
+    renderItemFrame(item);
+  }
     return;
   }
 
@@ -2060,6 +2077,14 @@ function levelSink(item) {
   return node;
 }
 
+function renderItemFrame(item) {
+  const zoom = item.frame?.zoom ?? 1;
+  itemZoom.value = String(zoom);
+  itemZoomValue.textContent = `${zoom.toFixed(2)}×`;
+  itemRotateValue.textContent = `${item.rotate ?? 0}°`;
+  itemFrameReset.disabled = frame.isDefault(item.frame, item.rotate ?? 0);
+}
+
 function renderItemAudio(item) {
   const level = item.gain ?? 1;
   itemMute.dataset.state = item.muted ? 'off' : 'on';
@@ -2083,6 +2108,108 @@ export async function setItemAudio(id, { gain, muted } = {}) {
 itemGain.addEventListener('input', () => {
   itemGainValue.textContent = `${Math.round(Number(itemGain.value) * 100)}%`;
   if (S.activeItemId) setItemAudio(S.activeItemId, { gain: Number(itemGain.value) }).catch(fail);
+});
+
+/** Turn, zoom or move a clip inside the output frame. */
+export async function setItemFrame(id, { zoom, x, y, rotate, reset } = {}) {
+  const item = allItems().find((i) => i.id === id);
+  if (!item) return null;
+  remember(reset ? 'reset framing' : rotate !== undefined ? 'rotate' : 'reframe');
+
+  if (reset) {
+    delete item.frame;
+    delete item.rotate;
+  } else {
+    if (rotate !== undefined) item.rotate = frame.turn(0, rotate);
+    if (zoom !== undefined || x !== undefined || y !== undefined) {
+      const current = { ...frame.DEFAULT_FRAME, ...item.frame };
+      item.frame = {
+        zoom: zoom ?? current.zoom,
+        x: x ?? current.x,
+        y: y ?? current.y,
+      };
+    }
+  }
+
+  updateUI();
+  await saveLanes();
+  await refreshPreview();
+  return item;
+}
+
+// Dragging the picture moves the frame, which is how anyone who has cropped a
+// photo on a phone expects it to work, and it needs no handles or overlay of
+// its own. Only while a sequence item is selected and showing.
+const framable = () => S.view === 'sequence' && !!selectedItem() && !S.playingSeq;
+
+let framingFrom = null;
+
+function frameGeometry(item) {
+  const source = sourceById(item.sourceId);
+  if (!media.isVideo(source)) return null;
+  // The canvas is letterboxed inside the stage, so a drag in stage pixels has
+  // to be measured against the drawn picture, not the element.
+  const box = preview.getBoundingClientRect();
+  const scale = Math.min(box.width / preview.width, box.height / preview.height);
+  return {
+    width: source.width,
+    height: source.height,
+    rotate: item.rotate ?? 0,
+    outWidth: preview.width,
+    outHeight: preview.height,
+    scale: scale || 1,
+  };
+}
+
+stage.addEventListener('pointerdown', (event) => {
+  if (!framable() || event.target.closest('#controls, .badge, .warn-toast, .drop')) return;
+  const item = selectedItem();
+  const geometry = frameGeometry(item);
+  if (!geometry) return;
+  framingFrom = { id: item.id, x: event.clientX, y: event.clientY, geometry };
+  capture(stage, event.pointerId);
+});
+
+stage.addEventListener('pointermove', (event) => {
+  if (!framingFrom || !stage.hasPointerCapture(event.pointerId)) return;
+  const item = allItems().find((i) => i.id === framingFrom.id);
+  if (!item) return;
+  const { geometry } = framingFrom;
+  const next = frame.pan(item.frame, {
+    ...geometry,
+    dx: (event.clientX - framingFrom.x) / geometry.scale,
+    dy: (event.clientY - framingFrom.y) / geometry.scale,
+  });
+  framingFrom.x = event.clientX;
+  framingFrom.y = event.clientY;
+  // Moved in place: a write per pointermove would fill the undo stack.
+  item.frame = next;
+  renderItemFrame(item);
+  refreshPreview().catch(fail);
+});
+
+for (const type of ['pointerup', 'pointercancel']) {
+  stage.addEventListener(type, () => {
+    if (!framingFrom) return;
+    const item = allItems().find((i) => i.id === framingFrom.id);
+    framingFrom = null;
+    // One step for the whole drag, applied through the normal path.
+    if (item) setItemFrame(item.id, { ...item.frame }).catch(fail);
+  });
+}
+
+itemRotate.addEventListener('click', () => {
+  const item = selectedItem();
+  if (item) setItemFrame(item.id, { rotate: frame.turn(item.rotate ?? 0) }).catch(fail);
+});
+
+itemZoom.addEventListener('input', () => {
+  itemZoomValue.textContent = `${Number(itemZoom.value).toFixed(2)}×`;
+  if (S.activeItemId) setItemFrame(S.activeItemId, { zoom: Number(itemZoom.value) }).catch(fail);
+});
+
+itemFrameReset.addEventListener('click', () => {
+  if (S.activeItemId) setItemFrame(S.activeItemId, { reset: true }).catch(fail);
 });
 
 itemMute.addEventListener('click', () => {
@@ -2519,6 +2646,7 @@ function updateView() {
     : (source ? (media.isVideo(source) ? `${source.width}×${source.height}` : 'audio') : '');
   timeline.classList.toggle('watching', !showing);
   sequenceEl.classList.toggle('watching', showing);
+  stage.classList.toggle('framing', framable());
 }
 
 // Coalesced exactly like seek(): overlapping calls otherwise finish in whatever
@@ -2586,7 +2714,7 @@ async function drainSeqSeeks() {
       const sample = await sink.getSample(sequence.sourceTime(row, want));
       if (!sample) return;
       try {
-        paint(sample, transitions.dimAt(want, transitionPlan()));
+        paint(sample, transitions.dimAt(want, transitionPlan()), row.item);
       } finally {
         sample.close();
       }
@@ -2996,7 +3124,7 @@ function forgetProject() {
     playhead: 0, in: 0, out: 0, seqPlayhead: 0, marking: null,
     view: 'source',
     audioTracks: [],
-    settings: { width: null, height: null, fps: null },
+    settings: { width: null, height: null, fps: null, fit: 'contain' },
     transitions: { intro: null, outro: null },
     boundary: null,
   });
@@ -3112,7 +3240,8 @@ export async function setSettings(next) {
 }
 
 function updateSettings() {
-  const { width, height, fps } = S.settings;
+  const { width, height, fps, fit } = S.settings;
+  if (fitSel.value !== (fit ?? 'contain')) fitSel.value = fit ?? 'contain';
   const res = width && height ? `${width}x${height}` : 'auto';
   if (resSel.value !== res) resSel.value = res;
   const rate = fps ? String(fps) : 'auto';
@@ -3122,6 +3251,10 @@ function updateSettings() {
 resSel.addEventListener('change', () => {
   const [width, height] = resSel.value === 'auto' ? [null, null] : resSel.value.split('x').map(Number);
   setSettings({ width, height }).catch(fail);
+});
+
+fitSel.addEventListener('change', () => {
+  setSettings({ fit: fitSel.value }).catch(fail);
 });
 
 fpsSel.addEventListener('change', () => {
@@ -3273,6 +3406,7 @@ Object.assign(window, {
   undo, redo, remember, historyDepth, notice, showFormats,
   cancelExport, transitions, transitionAt, setTransition, selectBoundary,
   addAudioTrack, removeAudioTrack, moveBetweenLanes, setItemAudio, itemLevel,
+  setItemFrame, frame, render,
   liveSyncActiveClip,
   refreshPreview,
   audio, setMusic, setMusicFromSource, removeMusic, setMusicGain, setMuted, setRate,

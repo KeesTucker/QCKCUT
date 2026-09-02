@@ -340,3 +340,58 @@ test('audio lanes keep their height whatever the transitions do', async ({ app }
   expect(boxes.joints, 'the scrubber holding the joints').toBeGreaterThan(12);
   expect(boxes.item, 'the audio lane is squashed').toBeGreaterThan(30);
 });
+
+// Regression: adding a lane recreates every lane's list element, but the
+// per-lane render caches still claimed to be up to date, so they synced
+// detached nodes and the new lists came up empty.
+test('adding a lane leaves the existing lane showing its items', async ({ app }) => {
+  await setup(app);
+  await place(app, 'bed.wav');                 // makes the first lane
+  await expect(laneItems(app)).toHaveCount(1);
+
+  await app.page.locator('#addAudioTrack').click();
+
+  await expect(lanes(app)).toHaveCount(2);
+  await expect(app.page.locator('#audioLanes .track-item'),
+    'the first lane emptied when the second was added').toHaveCount(1);
+  const s = await app.state();
+  expect(s.audioTracks.map((t) => t.items.length)).toEqual([1, 0]);
+});
+
+test('removing an item from one lane leaves the others alone', async ({ app }) => {
+  await setup(app);
+  await place(app, 'bed.wav');
+  const first = (await app.state()).audioTracks[0].id;
+  const second = (await app.page.evaluate(() => window.addAudioTrack())).id;
+  await app.page.evaluate(async ([id, lane]) => {
+    await window.addToSequence('source', id, 0, lane);
+    await window.addToSequence('source', id, 1, lane);
+  }, [await sourceIdOf(app, 'bed.wav'), second]);
+
+  await expect(app.page.locator('#audioLanes .track-item')).toHaveCount(3);
+
+  await app.page.evaluate((lane) => {
+    const target = window.S.audioTracks.find((t) => t.id === lane);
+    return window.removeFromSequence(target.items[0].id);
+  }, second);
+
+  const s = await app.state();
+  expect(s.audioTracks.find((t) => t.id === first).items).toHaveLength(1);
+  expect(s.audioTracks.find((t) => t.id === second).items).toHaveLength(1);
+  await expect(app.page.locator('#audioLanes .track-item'),
+    'removing one item cleared the lanes').toHaveCount(2);
+});
+
+test('removing a lane leaves the other lane showing its items', async ({ app }) => {
+  await setup(app);
+  await place(app, 'bed.wav');
+  const second = (await app.page.evaluate(() => window.addAudioTrack())).id;
+  await app.page.evaluate(async ([id, lane]) =>
+    window.addToSequence('source', id, 0, lane), [await sourceIdOf(app, 'bed.wav'), second]);
+  await expect(app.page.locator('#audioLanes .track-item')).toHaveCount(2);
+
+  await app.page.evaluate((lane) => window.removeAudioTrack(lane), second);
+
+  await expect(lanes(app)).toHaveCount(1);
+  await expect(app.page.locator('#audioLanes .track-item')).toHaveCount(1);
+});

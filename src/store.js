@@ -216,5 +216,11 @@ export async function getTransitions() {
 
 export async function getSettings() {
   const row = await run('settings', 'readonly', (s) => s.get(SETTINGS_KEY));
-  return row ? { width: row.width ?? null, height: row.height ?? null, fps: row.fps ?? null } : null;
+  if (!row) return null;
+  return {
+    width: row.width ?? null,
+    height: row.height ?? null,
+    fps: row.fps ?? null,
+    fit: row.fit ?? 'contain',
+  };
 }

@@ -33,7 +33,7 @@ async function renderSequence(app) {
 
 test('output defaults to matching the source', async ({ app }) => {
   const s = await app.state();
-  expect(s.settings).toEqual({ width: null, height: null, fps: null });
+  expect(s.settings).toEqual({ width: null, height: null, fps: null, fit: 'contain' });
   await app.page.locator('#settingsBtn').click();
   await expect(app.page.locator('#resSel')).toHaveValue('auto');
   await expect(app.page.locator('#fpsSel')).toHaveValue('auto');
@@ -45,17 +45,17 @@ test('the settings persist with the project', async ({ app }) => {
   await app.page.locator('#fpsSel').selectOption('30');
 
   await expect.poll(async () => (await app.state()).settings)
-    .toEqual({ width: 1080, height: 1920, fps: 30 });
+    .toEqual({ width: 1080, height: 1920, fps: 30, fit: 'contain' });
 
   await app.page.reload();
   await app.page.waitForFunction(() => window.S?.project);
-  expect((await app.state()).settings).toEqual({ width: 1080, height: 1920, fps: 30 });
+  expect((await app.state()).settings).toEqual({ width: 1080, height: 1920, fps: 30, fit: 'contain' });
 });
 
 test('settings belong to their own project', async ({ app }) => {
   await app.page.evaluate(() => window.setSettings({ width: 1280, height: 720 }));
   await app.page.evaluate(() => window.newProject('Other'));
-  expect((await app.state()).settings).toEqual({ width: null, height: null, fps: null });
+  expect((await app.state()).settings).toEqual({ width: null, height: null, fps: null, fit: 'contain' });
 });
 
 test('a resolution setting shapes the render', async ({ app }) => {

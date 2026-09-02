@@ -19,7 +19,7 @@ Package manager is **pnpm** (pinned in `packageManager`).
 ```bash
 pnpm install
 pnpm dev              # Vite on http://localhost:5173
-pnpm test             # the gate: 281 Playwright tests in real Chrome
+pnpm test             # the gate: 295 Playwright tests in real Chrome
 pnpm build            # production bundle into dist/
 pnpm preview          # serve that bundle
 pnpm test:report      # open the HTML report
@@ -41,8 +41,8 @@ there is no browser download after `pnpm install`.
 ```
 index.html              Vite entry. Stays at the root; that is the convention.
 vite.config.js
-src/                    app.js, audio.js, media.js, render.js, sequence.js,
-                        transitions.js, store.js, styles.css
+src/                    app.js, audio.js, frame.js, media.js, render.js,
+                        sequence.js, transitions.js, store.js, styles.css
 test/
   fixture.mjs           encodes a synthetic clip in the browser
   mediabunny.mjs        re-export, see below
@@ -76,13 +76,14 @@ Two things follow from Vite that are easy to trip over:
 
 ## Architecture
 
-### Seven modules
+### Eight modules
 
 - `store.js` — IndexedDB. Sources hold blobs, which localStorage cannot take.
 - `audio.js` — the AudioContext, playback scheduling, scrub grains, waveforms.
 - `media.js` — opening media, the decoder pool, filmstrip tile decoding.
 - `sequence.js` — the timeline model. Pure and DOM-free, so it unit-tests cleanly.
 - `transitions.js` — what a transition looks like, also pure.
+- `frame.js` — where a clip sits inside the output frame. Pure.
 - `render.js` — turning a range or a sequence into an MP4.
 - `app.js` — state, rendering, and all DOM wiring.
 
@@ -568,6 +569,38 @@ Two rules that are easy to get wrong:
 
 Deleting a source is undoable: the snapshot holds the source objects, and their
 blobs are references, so restoring one puts the media back too.
+
+## Framing
+
+Output settings decide the *shape* of the file; each clip decides what part of
+itself you see inside it.
+
+`frame.cropFor()` returns a crop whose **aspect always equals the output's**, so
+framing has only two degrees of freedom: how tight (`zoom`) and where (`x`, `y`,
+the centre in fractions of the source). That is exactly what reframing 16:9 into
+9:16 needs, and it makes a squashed picture unrepresentable. The rectangle is
+clamped inside the source, so the frame can move but never off the edge.
+
+`render.placement()` is the single function that turns an item into
+`drawWithFit` options, and **both the preview and the render call it**. Framing
+whose preview lies is worse than no framing.
+
+A clip left alone follows `settings.fit` instead: `contain` letterboxes it,
+`cover` fills the frame and crops the edges.
+
+Rotation is per item and comes first: `drawWithFit` crops *after* rotating, so
+every number in `frame.js` is in the rotated space, and `rotated()` swaps width
+and height for 90 and 270.
+
+Dragging the picture moves the frame, which needs no handles and is how anyone
+who has cropped a photo on a phone expects it to work. The drag mutates in
+place and calls `setItemFrame()` once on release, or one gesture would fill the
+undo stack.
+
+**A framing test needs a fixture that varies in space.** The `bar` pattern fills
+each frame with a single colour, so any crop of it looks like any other and a
+preview-versus-render comparison passes whatever the crop was. The `grid` clip
+exists for this: four by four cells, distinct in both axes.
 
 ## The Effects tab follows the selection
 

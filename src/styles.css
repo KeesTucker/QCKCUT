@@ -1164,3 +1164,8 @@ body.resizing { cursor: ns-resize; user-select: none; }
 .format[data-ok="no"] { color: var(--dim); opacity: .6; }
 .format[data-ok="no"]::after { content: " ✕"; }
 .format[data-ok="yes"]::after { content: " ✓"; }
+
+/* Framing: the picture itself is the handle */
+.stage.framing { cursor: grab; }
+.stage.framing:active { cursor: grabbing; }
+#itemRotateValue { margin-left: auto; }

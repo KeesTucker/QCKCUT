@@ -4,7 +4,7 @@ import {
   AudioBufferSource, BufferTarget, CanvasSource, Mp4OutputFormat, Output, QUALITY_LOW,
 } from 'mediabunny';
 
-export async function makeClip({ seconds = 6, fps = 30, width = 640, height = 360, keyFrameInterval = 1, tone = 0 } = {}) {
+export async function makeClip({ seconds = 6, fps = 30, width = 640, height = 360, keyFrameInterval = 1, tone = 0, pattern = 'bar' } = {}) {
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
@@ -40,13 +40,28 @@ export async function makeClip({ seconds = 6, fps = 30, width = 640, height = 36
     const t = i / fps;
     // Hue ramp plus a travelling bar: both the frame index and the time are
     // readable straight off a screenshot.
-    ctx.fillStyle = `hsl(${(t / seconds) * 320} 70% 45%)`;
-    ctx.fillRect(0, 0, width, height);
-    ctx.fillStyle = '#fff';
-    ctx.fillRect((i / total) * (width - 40), 0, 40, height);
-    ctx.font = 'bold 48px monospace';
-    ctx.fillStyle = '#000';
-    ctx.fillText(`${t.toFixed(2)}s`, 24, height - 32);
+    if (pattern === 'grid') {
+      // Strong variation in both axes. The bar pattern fills the whole frame
+      // with one colour, so cropping it proves nothing: any region looks like
+      // any other, and a framing test passes whatever the crop was.
+      const cols = 4;
+      const rows = 4;
+      for (let cx = 0; cx < cols; cx++) {
+        for (let cy = 0; cy < rows; cy++) {
+          ctx.fillStyle = `rgb(${(cx * 255) / (cols - 1) | 0}, ${(cy * 255) / (rows - 1) | 0}, `
+            + `${((i / total) * 200 + 40) | 0})`;
+          ctx.fillRect((cx * width) / cols, (cy * height) / rows, width / cols + 1, height / rows + 1);
+        }
+      }
+    } else {
+      ctx.fillStyle = `hsl(${(t / seconds) * 320} 70% 45%)`;
+      ctx.fillRect(0, 0, width, height);
+      ctx.fillStyle = '#fff';
+      ctx.fillRect((i / total) * (width - 40), 0, 40, height);
+      ctx.font = 'bold 48px monospace';
+      ctx.fillStyle = '#000';
+      ctx.fillText(`${t.toFixed(2)}s`, 24, height - 32);
+    }
     await source.add(t, 1 / fps);
   }
 

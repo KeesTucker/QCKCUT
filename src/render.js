@@ -14,6 +14,7 @@ import {
   VideoSampleSink,
 } from 'mediabunny';
 import * as media from './media.js';
+import * as frame from './frame.js';
 import * as transitions from './transitions.js';
 
 /** Thrown when a render is stopped on purpose, so callers can tell it apart. */
@@ -75,7 +76,7 @@ export async function renderClip(source, start, end, onProgress, settings = {}, 
  * with nothing to show for it, so the phase is reported rather than left to
  * look like a hang.
  */
-export async function renderSequence(rows, sourceOf, onProgress, music = null, shape = null, fps = null, signal, plan = null, audioLanes = [], total = null) {
+export async function renderSequence(rows, sourceOf, onProgress, music = null, shape = null, fps = null, signal, plan = null, audioLanes = [], total = null, settings = {}) {
   // Video rows can legitimately be empty: a sequence may be sound over black.
   if (!rows.length && !(total > 0)) throw new Error('the sequence is empty');
   // The caller picks the shape, because the first item may be audio and have
@@ -111,7 +112,7 @@ export async function renderSequence(rows, sourceOf, onProgress, music = null, s
   onProgress?.(0, 'video');
 
   try {
-    await renderFrames({ rows, sourceOf, ctx, canvas, video, total: length, fps, onProgress, signal, plan });
+    await renderFrames({ rows, sourceOf, ctx, canvas, video, total: length, fps, onProgress, signal, plan, fit: settings.fit });
   } catch (error) {
     // A started Output holds an encoder, so it has to be cancelled either way.
     await output.cancel().catch(() => {});
@@ -124,7 +125,31 @@ export async function renderSequence(rows, sourceOf, onProgress, music = null, s
   return new Blob([output.target.buffer], { type: 'video/mp4' });
 }
 
-async function renderFrames({ rows, sourceOf, ctx, canvas, video, total, fps, onProgress, signal, plan }) {
+/**
+ * How one item is drawn into the output frame: its own framing if it has any,
+ * otherwise the project's fitting choice. The preview calls the same function,
+ * which is the whole point of it.
+ */
+export function placement(item, source, canvas, fit = 'contain') {
+  const rotate = item.rotate ?? 0;
+  const crop = frame.cropFor({
+    width: source.width,
+    height: source.height,
+    rotate,
+    outWidth: canvas.width,
+    outHeight: canvas.height,
+    frame: item.frame,
+  });
+  return {
+    // A crop already matches the output's shape, so there is nothing left to
+    // letterbox and 'fill' is exact.
+    fit: crop ? 'fill' : (item.frame ? 'cover' : fit),
+    ...(rotate ? { rotation: rotate } : {}),
+    ...(crop ? { crop } : {}),
+  };
+}
+
+async function renderFrames({ rows, sourceOf, ctx, canvas, video, total, fps, onProgress, signal, plan, fit }) {
   // The same darkening the preview applies, from the same function.
   const darken = (at) => {
     const dim = plan ? transitions.dimAt(at, plan) : 0;
@@ -164,7 +189,7 @@ async function renderFrames({ rows, sourceOf, ctx, canvas, video, total, fps, on
           try {
             ctx.fillStyle = '#000';
             ctx.fillRect(0, 0, canvas.width, canvas.height);
-            sample.drawWithFit(ctx, { fit: 'contain' });
+            sample.drawWithFit(ctx, placement(row.item, source, canvas, fit));
             darken(at);
             await video.add(at, 1 / fps);
             onProgress?.(Math.min(1, at / total), 'video');
@@ -216,7 +241,7 @@ async function renderFrames({ rows, sourceOf, ctx, canvas, video, total, fps, on
           ctx.fillStyle = '#000';
           ctx.fillRect(0, 0, canvas.width, canvas.height);
           const at = atOf(sample.timestamp);
-          sample.drawWithFit(ctx, { fit: 'contain' });
+          sample.drawWithFit(ctx, placement(row.item, source, canvas, fit));
           darken(at);
           const nextAt = !lookahead.done && !past(lookahead.value)
             ? atOf(lookahead.value.timestamp)

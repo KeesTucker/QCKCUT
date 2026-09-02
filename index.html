@@ -82,8 +82,30 @@
                  aria-label="Clip level">
           <span id="itemGainValue" class="time">100%</span>
         </label>
-        <p class="effect-note">Only this clip. The preview and the render use the
-        same number, so what you hear is what comes out.</p>
+
+        <div class="effect-row">
+          <span class="effect-label">Framing</span>
+          <button id="itemRotate" class="ctl" title="Turn a quarter clockwise"
+                  aria-label="Rotate this clip">
+            <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
+              <path class="blade" d="M13 8a5 5 0 1 1-1.6-3.7"/>
+              <path class="blade" d="M13.2 1.9v3h-3"/>
+            </svg>
+          </button>
+        </div>
+        <label class="effect-duration">
+          <span>Zoom</span>
+          <input id="itemZoom" type="range" min="1" max="6" step="0.02" value="1"
+                 aria-label="Clip zoom">
+          <span id="itemZoomValue" class="time">1.00&times;</span>
+        </label>
+        <p class="effect-note" id="frameNote">Drag the picture to move the frame.
+        The preview and the render use the same numbers, so what you line up is
+        what comes out.</p>
+        <div class="effect-row">
+          <button id="itemFrameReset" class="ghost text">Reset framing</button>
+          <span id="itemRotateValue" class="time">0&deg;</span>
+        </div>
       </div>
     </div>
   </aside>
@@ -260,6 +282,16 @@
       </section>
 
       <section>
+        <h4>Framing</h4>
+        <p>Output settings decide the shape of the file; each clip decides what of
+        it you see. Select a clip, open Effects, and turn it a quarter at a time,
+        zoom in, or drag the picture to move the frame. The crop always matches the
+        output's shape, so a clip can never come out squashed.</p>
+        <p>Leave a clip alone and it follows the <kbd>Settings</kbd> fitting choice
+        instead: letterboxed whole, or filled with the edges cropped away.</p>
+      </section>
+
+      <section>
         <h4>Clip sound</h4>
         <p>Click a clip on the sequence, then open Effects: each one has its own
         level and its own mute, so a noisy take can sit under music without
@@ -383,6 +415,16 @@
         </select>
         <p>Anything shaped differently is letterboxed into it, never stretched.</p>
       </section>
+      <section>
+        <h4>Fitting</h4>
+        <select id="fitSel" class="setting">
+          <option value="contain">Letterbox &middot; show the whole picture</option>
+          <option value="cover">Fill &middot; crop the edges away</option>
+        </select>
+        <p>What happens to a clip shaped differently from the output. Any clip you
+        have framed by hand ignores this and uses its own framing.</p>
+      </section>
+
       <section>
         <h4>Frame rate</h4>
         <select id="fpsSel" class="setting">
