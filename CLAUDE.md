@@ -19,7 +19,7 @@ Package manager is **pnpm** (pinned in `packageManager`).
 ```bash
 pnpm install
 pnpm dev              # Vite on http://localhost:5173
-pnpm test             # the gate: 265 Playwright tests in real Chrome
+pnpm test             # the gate: 276 Playwright tests in real Chrome
 pnpm build            # production bundle into dist/
 pnpm preview          # serve that bundle
 pnpm test:report      # open the HTML report
@@ -521,6 +521,29 @@ follows its trims, so the timeline shows the clip you have rather than the one
 you had when you dragged it on. Items dragged straight from a source have no
 `clipId` and are never touched, and deleting a clip costs its items nothing
 because they hold their own range.
+
+## Undo
+
+A stack of **whole-state snapshots**, not inverse operations. The editable state
+is small plain data and the blobs are shared by reference, so a snapshot costs
+almost nothing, and there is no way for an inverse to be subtly wrong.
+
+`remember(label)` is called **before** a change, in the words the toast will use:
+being told *what* was undone is most of the value. Applying a snapshot rewrites
+every store (`store.replaceAll`), because working out the minimal difference
+would be a lot of care for no gain at these sizes and a subtle mistake would
+corrupt a project.
+
+Two rules that are easy to get wrong:
+
+- **Once per gesture, not once per event.** A trim drag calls `remember()` on
+  `pointerdown`, not on every `pointermove`, or one drag fills the stack.
+- **Applying a snapshot must clear every render cache** (`clipsShape`,
+  `trackShape`, `sourcesShape`, `laneCaches`, `audioLanesShape`), since the lists
+  they are keyed off changed wholesale.
+
+Deleting a source is undoable: the snapshot holds the source objects, and their
+blobs are references, so restoring one puts the media back too.
 
 ## The Effects tab follows the selection
 

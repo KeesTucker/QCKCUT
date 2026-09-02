@@ -1137,3 +1137,11 @@ body.resizing { cursor: ns-resize; user-select: none; }
   font-variant-numeric: tabular-nums;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
+
+/* The same toast, without the alarm: undo is not a warning. */
+.warn-toast.notice .wt-row {
+  border-bottom-color: var(--accent);
+  background: rgba(20, 14, 28, .96);
+}
+.warn-toast.notice .wt-icon,
+.warn-toast.notice .wt-title { color: var(--accent); }

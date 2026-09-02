@@ -108,6 +108,7 @@ const seqPlayheadEl = $('seqPlayheadEl');
 const warnToast = $('warnToast');
 const warnTitle = $('warnTitle');
 const warnMsg = $('warnMsg');
+const warnIcon = $('warnIcon');
 const controls = $('controls');
 const hintEl = $('hint');
 const menuEl = $('menu');
@@ -816,6 +817,7 @@ async function syncItemsFromClip(clip) {
 export async function setClipRange(id, start, end) {
   const clip = S.clips.find((c) => c.id === id);
   if (!clip) return null;
+  remember('trim');
   const duration = sourceOf(clip)?.duration ?? 0;
 
   let nextIn = clamp(start ?? clip.in, 0, Math.max(0, duration - MIN_RANGE));
@@ -985,6 +987,7 @@ function updateUI() {
 
 export async function addSource(file) {
   setStatus(`reading ${file.name}…`);
+  remember(`import ${file.name}`);
   const source = { id: mintId('s'), name: file.name, blob: file, thumbs: [], thumbCount: 0, poster: null, posterUrl: null };
   Object.assign(source, await media.probe(source));
   S.sources.push(source);
@@ -1034,6 +1037,7 @@ export async function setActive(id) {
 }
 
 export async function removeSource(id) {
+  remember(`delete ${sourceById(id)?.name ?? 'source'}`);
   // Clips and sequence items referencing this source go with it; nothing else
   // points at a source.
   for (const clip of clipsFor(id)) await store.dropClip(clip.id);
@@ -1129,6 +1133,7 @@ export async function addClip() {
   const source = active();
   if (!source || S.out - S.in < MIN_RANGE) return null;
   clearWarning();
+  remember('make clip');
   const clip = {
     id: mintId('c'),
     sourceId: source.id,
@@ -1158,6 +1163,7 @@ export async function selectClip(id) {
 export async function renameSource(id, name) {
   const source = sourceById(id);
   if (!source || !name) return null;
+  remember('rename source');
   source.name = name;
   await store.putSource(source);
   updateUI();
@@ -1167,6 +1173,7 @@ export async function renameSource(id, name) {
 export async function renameClip(id, label) {
   const clip = S.clips.find((c) => c.id === id);
   if (!clip || !label) return null;
+  remember('rename clip');
   clip.label = label;
   await store.putClip(clip);
   updateUI();
@@ -1176,6 +1183,7 @@ export async function renameClip(id, label) {
 export async function renameItem(id, label) {
   const item = allItems().find((i) => i.id === id);
   if (!item || !label) return null;
+  remember('rename');
   item.label = label;
   await saveLanes();
   updateUI();
@@ -1183,6 +1191,7 @@ export async function renameItem(id, label) {
 }
 
 export async function removeClip(id) {
+  remember('delete clip');
   S.clips = S.clips.filter((c) => c.id !== id);
   if (S.activeClipId === id) S.activeClipId = null;
   await store.dropClip(id);
@@ -1425,6 +1434,7 @@ function buildAudioLane(trackItem) {
 }
 
 export async function addAudioTrack() {
+  remember('add audio track');
   const trackItem = { id: mintId('at'), items: [] };
   S.audioTracks = [...S.audioTracks, trackItem];
   await store.putTracks(S.audioTracks.map((t) => t.id));
@@ -1433,6 +1443,7 @@ export async function addAudioTrack() {
 }
 
 export async function removeAudioTrack(id) {
+  remember('remove audio track');
   S.audioTracks = S.audioTracks.filter((t) => t.id !== id);
   laneCaches.delete(id);
   await store.putTracks(S.audioTracks.map((t) => t.id));
@@ -1472,6 +1483,7 @@ function itemFrom(kind, id) {
 export async function addToSequence(kind, id, index = S.timeline.length, trackId = null) {
   const item = itemFrom(kind, id);
   if (!item) return null;
+  remember('add to sequence');
 
   // Sound dropped on the picture lane would sit *between* clips rather than
   // under them, which is never what was meant. It gets a lane of its own,
@@ -1514,6 +1526,7 @@ function laneOf(itemId) {
 const allItems = () => [...S.timeline, ...S.audioTracks.flatMap((t) => t.items)];
 
 export async function removeFromSequence(id) {
+  remember('remove from sequence');
   const trackId = laneOf(id);
   setLaneItems(trackId, sequence.remove(itemsOf(trackId), id));
   if (S.activeItemId === id) S.activeItemId = null;
@@ -1524,6 +1537,7 @@ export async function removeFromSequence(id) {
 }
 
 export async function moveInSequence(from, to, trackId = null) {
+  remember('reorder');
   setLaneItems(trackId, sequence.move(itemsOf(trackId), from, to));
   updateUI();
   await saveLanes();
@@ -1634,6 +1648,7 @@ export async function moveBetweenLanes(fromTrack, index, toTrack, slot) {
   const source = itemsOf(fromTrack);
   const item = source[index];
   if (!item) return null;
+  remember('move between tracks');
   setLaneItems(fromTrack, source.filter((_, i) => i !== index));
   setLaneItems(toTrack, sequence.insert(itemsOf(toTrack), item, slot));
   S.activeItemId = item.id;
@@ -1932,6 +1947,7 @@ export function transitionAt(boundary) {
 
 export async function setTransition(boundary, type, duration) {
   if (!boundary) return null;
+  remember('transition');
   const length = duration ?? transitionAt(boundary)?.duration
     ?? transitions.KINDS[type]?.duration ?? transitions.DEFAULT_DURATION;
   const value = type === 'none' ? null : { type, duration: length };
@@ -2052,6 +2068,7 @@ function renderItemAudio(item) {
 export async function setItemAudio(id, { gain, muted } = {}) {
   const item = allItems().find((i) => i.id === id);
   if (!item) return null;
+  remember(muted !== undefined ? (muted ? 'mute clip' : 'unmute clip') : 'clip level');
   if (gain !== undefined) item.gain = clamp(gain, 0, 1);
   if (muted !== undefined) item.muted = !!muted;
   updateUI();
@@ -2329,6 +2346,8 @@ function bindHandle(el, which) {
     if (!held) return;
     event.stopPropagation();
     pause();
+    // Once per drag, not once per pointermove.
+    remember('trim');
     capture(el, event.pointerId);
   });
   el.addEventListener('pointermove', (event) => {
@@ -2353,12 +2372,14 @@ playBtn.addEventListener('click', () => togglePlay());
 /** Set the range by hand. The buttons are gone; these are what I and O do. */
 export function markIn() {
   if (!requireSource()) return;
+  remember('mark in');
   S.in = clamp(S.playhead, 0, S.out - MIN_RANGE);
   afterRangeEdit();
 }
 
 export function markOut() {
   if (!requireSource()) return;
+  remember('mark out');
   S.out = clamp(S.playhead, S.in + MIN_RANGE, active()?.duration ?? 0);
   afterRangeEdit();
 }
@@ -2379,6 +2400,11 @@ document.addEventListener('keydown', (event) => {
   if (S.exporting) {
     // Everything else is inert while rendering, but stopping stays reachable.
     if (event.key === 'Escape') cancelExport();
+    return;
+  }
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') {
+    event.preventDefault();
+    (event.shiftKey ? redo() : undo()).catch(fail);
     return;
   }
   if (event.key === '?') { event.preventDefault(); return openHelp(); }
@@ -2443,6 +2469,7 @@ exportBtn.addEventListener('click', () => { Promise.resolve(exportShowing()).cat
 export async function appendRange() {
   const source = active();
   if (!source || S.out - S.in < MIN_RANGE) return null;
+  remember('add to sequence');
   const item = {
     id: mintId('t'),
     sourceId: source.id,
@@ -2568,11 +2595,22 @@ async function drainSeqSeeks() {
 let warnTimer = 0;
 
 export function warn(title, message) {
+  say(title, message, { notice: false, icon: '\u26a0', ms: 4000 });
+}
+
+/** The same toast without the alarm: undo is not a warning. */
+export function notice(title, message = '') {
+  say(title, message, { notice: true, icon: '\u21ba', ms: 2200 });
+}
+
+function say(title, message, { notice: isNotice, icon, ms }) {
+  warnIcon.textContent = icon;
   warnTitle.textContent = title;
   warnMsg.textContent = message;
+  warnToast.classList.toggle('notice', isNotice);
   warnToast.classList.add('visible');
   clearTimeout(warnTimer);
-  warnTimer = setTimeout(() => warnToast.classList.remove('visible'), 4000);
+  warnTimer = setTimeout(() => warnToast.classList.remove('visible'), ms);
 }
 
 export function clearWarning() {
@@ -2793,6 +2831,114 @@ window.addEventListener('resize', () => {
   resizeTimer = setTimeout(drawStrip, 120);
 });
 
+// ─── Undo ────────────────────────────────────────────────────────────────────
+// A stack of whole-state snapshots rather than a list of inverse operations.
+// The editable state is small plain data and the blobs are shared by reference,
+// so a snapshot costs almost nothing, and there is no way for an inverse to be
+// subtly wrong.
+//
+// Every entry carries a label, because being told *what* was undone is most of
+// the value: "undid trim" tells you where you are, an empty step does not.
+
+const past = [];
+const future = [];
+const HISTORY = 60;
+
+function captureState() {
+  return {
+    sources: S.sources.map((x) => ({ ...x })),
+    clips: S.clips.map((x) => ({ ...x })),
+    timeline: S.timeline.map((x) => ({ ...x })),
+    audioTracks: S.audioTracks.map((t) => ({ id: t.id, items: t.items.map((x) => ({ ...x })) })),
+    transitions: { ...S.transitions },
+    settings: { ...S.settings },
+    activeId: S.activeId,
+    activeClipId: S.activeClipId,
+    activeItemId: S.activeItemId,
+  };
+}
+
+/** Called *before* a change, naming it in the words the toast will use. */
+export function remember(label) {
+  past.push({ ...captureState(), label });
+  if (past.length > HISTORY) past.shift();
+  future.length = 0;
+  return label;
+}
+
+async function apply(state) {
+  Object.assign(S, {
+    sources: state.sources,
+    clips: state.clips,
+    timeline: state.timeline,
+    audioTracks: state.audioTracks,
+    transitions: state.transitions,
+    settings: state.settings,
+    activeClipId: state.activeClipId,
+    activeItemId: state.activeItemId,
+    boundary: null,
+    marking: null,
+  });
+
+  // Every render cache is keyed off the lists that just changed wholesale.
+  clipsShape = null;
+  trackShape = null;
+  sourcesShape = null;
+  sourceRows = new Map();
+  laneCaches.clear();
+  audioLanesShape = null;
+
+  // The source on screen may have gone, or come back.
+  const wanted = S.sources.find((x) => x.id === state.activeId) ? state.activeId : S.sources[0]?.id;
+  if (wanted !== S.activeId) {
+    if (held) media.release(S.activeId);
+    held = null;
+    S.activeId = wanted ?? null;
+    if (S.activeId) held = await media.acquire(active());
+  }
+  for (const source of S.sources) if (!source.thumbCount) queueStrip(source);
+
+  await store.replaceAll({
+    sources: S.sources,
+    clips: S.clips,
+    lanes: [
+      { trackId: null, items: S.timeline },
+      ...S.audioTracks.map((t) => ({ trackId: t.id, items: t.items })),
+    ],
+    trackIds: S.audioTracks.map((t) => t.id),
+    transitions: S.transitions,
+    settings: S.settings,
+  });
+
+  updateUI();
+  await refreshPreview();
+}
+
+export async function undo() {
+  if (!past.length) return null;
+  const entry = past.pop();
+  future.push({ ...captureState(), label: entry.label });
+  await apply(entry);
+  notice('Undone', entry.label);
+  return entry.label;
+}
+
+export async function redo() {
+  if (!future.length) return null;
+  const entry = future.pop();
+  past.push({ ...captureState(), label: entry.label });
+  await apply(entry);
+  notice('Redone', entry.label);
+  return entry.label;
+}
+
+export const historyDepth = () => ({ past: past.length, future: future.length });
+
+function forgetHistory() {
+  past.length = 0;
+  future.length = 0;
+}
+
 // ─── Projects ────────────────────────────────────────────────────────────────
 // Each project is its own database, so opening one is closing the last and
 // loading from another. Nothing is shared, so nothing can leak between them.
@@ -2826,6 +2972,7 @@ function forgetProject() {
   audioLanesShape = null;
   stripQueued.clear();
   nextId = 1;
+  forgetHistory();
 
   // The canvas holds whatever it last painted, so without this a new project
   // opens showing the previous one's frame.
@@ -2919,6 +3066,7 @@ renameable(projectNameEl, () => S.project?.name ?? 'Untitled', renameProject);
 // Null means match the source, which is the default and what most exports want.
 
 export async function setSettings(next) {
+  remember('output settings');
   S.settings = { ...S.settings, ...next };
   await store.putSettings(S.settings);
   updateUI();
@@ -3084,6 +3232,7 @@ Object.assign(window, {
   setView, seekSequence, togglePlay, seqTimeForX, exportShowing, warn, clearWarning,
   setTracksHeight,
   boot, openProject, newProject, renameProject, dropProject, setSettings, outputShape,
+  undo, redo, remember, historyDepth, notice,
   cancelExport, transitions, transitionAt, setTransition, selectBoundary,
   addAudioTrack, removeAudioTrack, moveBetweenLanes, setItemAudio, itemLevel,
   liveSyncActiveClip,

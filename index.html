@@ -123,7 +123,7 @@
 
     <div class="warn-toast" id="warnToast" role="status" aria-live="polite">
       <div class="wt-row">
-        <span class="wt-icon">&#9888;</span>
+        <span class="wt-icon" id="warnIcon">&#9888;</span>
         <span class="wt-title" id="warnTitle"></span>
         <span class="wt-msg" id="warnMsg"></span>
       </div>
@@ -252,6 +252,14 @@
       </section>
 
       <section>
+        <h4>Undo</h4>
+        <p><kbd>&#8984;Z</kbd> steps back, <kbd>&#8984;&#8679;Z</kbd> forward again, and a
+        note over the picture says what was undone so you are never guessing. It covers
+        everything you can edit: clips, the sequence, transitions, levels, output settings,
+        and importing or deleting a source.</p>
+      </section>
+
+      <section>
         <h4>Clip sound</h4>
         <p>Click a clip on the sequence, then open Effects: each one has its own
         level and its own mute, so a noisy take can sit under music without
@@ -322,6 +330,8 @@
           <tr><td><kbd>C</kbd></td><td>Mark the start of a clip, then its end</td></tr>
           <tr><td><kbd>T</kbd></td><td>Append the current range to the sequence</td></tr>
           <tr><td><kbd>M</kbd></td><td>Mute or unmute the preview</td></tr>
+          <tr><td><kbd>&#8984;Z</kbd></td><td>Undo</td></tr>
+          <tr><td><kbd>&#8984;&#8679;Z</kbd></td><td>Redo</td></tr>
           <tr><td><kbd>?</kbd></td><td>Open this help</td></tr>
           <tr><td><kbd>Esc</kbd></td><td>Cancel a mark, or close this help</td></tr>
         </table>

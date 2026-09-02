@@ -165,6 +165,21 @@ export const putMusic = (music) => run('music', 'readwrite',
 export const dropMusic = () => run('music', 'readwrite', (s) => s.delete(MUSIC_KEY));
 export const getMusic = () => run('music', 'readonly', (s) => s.get(MUSIC_KEY));
 
+/**
+ * Rewrite every store from one state. Used by undo: working out the minimal
+ * difference between two snapshots would be a lot of care for no gain at these
+ * sizes, and getting it subtly wrong would corrupt a project.
+ */
+export async function replaceAll({ sources, clips, lanes, trackIds, transitions, settings }) {
+  await clearAll();
+  for (const source of sources) await putSource(source);
+  for (const clip of clips) await putClip(clip);
+  await putTimeline(lanes);
+  await putTracks(trackIds);
+  if (transitions) await putTransitions(transitions);
+  if (settings) await putSettings(settings);
+}
+
 export async function clearAll() {
   for (const store of STORES) await run(store, 'readwrite', (s) => s.clear());
 }
