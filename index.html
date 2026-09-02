@@ -52,12 +52,39 @@
         <span id="effectWhere" class="effect-where"></span>
         <span id="effectAt" class="time"></span>
       </div>
-      <ul id="effectList" class="list"></ul>
-      <label class="effect-duration" id="effectDurationWrap">
-        <span>Length</span>
-        <input id="effectDuration" type="range" min="0.1" max="2" step="0.05" value="0.5">
-        <span id="effectDurationValue" class="time">0.50s</span>
-      </label>
+
+      <div id="transitionBox">
+        <ul id="effectList" class="list"></ul>
+        <label class="effect-duration" id="effectDurationWrap">
+          <span>Length</span>
+          <input id="effectDuration" type="range" min="0.1" max="2" step="0.05" value="0.5">
+          <span id="effectDurationValue" class="time">0.50s</span>
+        </label>
+      </div>
+
+      <div id="clipAudioBox" hidden>
+        <div class="effect-row">
+          <span class="effect-label">Sound</span>
+          <button id="itemMute" class="ctl" data-state="on" aria-label="Mute this clip">
+            <svg class="icon sound" viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M3 6h2.4L8.6 3.2v9.6L5.4 10H3z"/>
+              <path class="wave" d="M10.6 5.8a3.2 3.2 0 0 1 0 4.4M12.5 4a5.8 5.8 0 0 1 0 8"/>
+            </svg>
+            <svg class="icon muted" viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M3 6h2.4L8.6 3.2v9.6L5.4 10H3z"/>
+              <path class="wave" d="M10.8 6.2l3.4 3.6M14.2 6.2l-3.4 3.6"/>
+            </svg>
+          </button>
+        </div>
+        <label class="effect-duration">
+          <span>Level</span>
+          <input id="itemGain" type="range" min="0" max="1" step="0.01" value="1"
+                 aria-label="Clip level">
+          <span id="itemGainValue" class="time">100%</span>
+        </label>
+        <p class="effect-note">Only this clip. The preview and the render use the
+        same number, so what you hear is what comes out.</p>
+      </div>
     </div>
   </aside>
 
@@ -222,6 +249,13 @@
         track and it shows the sequence. Whichever is showing is what the play
         button plays, and the active area is outlined so you can see at a glance
         where you are.</p>
+      </section>
+
+      <section>
+        <h4>Clip sound</h4>
+        <p>Click a clip on the sequence, then open Effects: each one has its own
+        level and its own mute, so a noisy take can sit under music without
+        touching anything else.</p>
       </section>
 
       <section>

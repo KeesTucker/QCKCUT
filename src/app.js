@@ -124,6 +124,11 @@ const effectAt = $('effectAt');
 const effectDuration = $('effectDuration');
 const effectDurationWrap = $('effectDurationWrap');
 const effectDurationValue = $('effectDurationValue');
+const transitionBox = $('transitionBox');
+const clipAudioBox = $('clipAudioBox');
+const itemMute = $('itemMute');
+const itemGain = $('itemGain');
+const itemGainValue = $('itemGainValue');
 const musicGainWrap = $('musicGainWrap');
 const musicGain = $('musicGain');
 const musicName = $('musicName');
@@ -1262,7 +1267,7 @@ const laneCache = (trackId) => {
 };
 
 const laneShapeOf = (items) => items
-  .map((i) => `${i.id}:${i.label}:${sourceById(i.sourceId)?.posterUrl ? 1 : 0}`)
+  .map((i) => `${i.id}:${i.label}:${itemLevel(i)}:${sourceById(i.sourceId)?.posterUrl ? 1 : 0}`)
   .join(',') + `|${S.activeItemId}`;
 
 function renderTrack() {
@@ -1298,7 +1303,8 @@ function buildItem(row, trackId, total, cache) {
     audioLane || !media.isVideo(source) ? ' audio' : '',
     row.item.id === S.activeItemId ? ' active' : '',
   ];
-  el.className = `track-item${kinds.join('')}`;
+  const level = itemLevel(row.item);
+  el.className = `track-item${kinds.join('')}${level < 1 ? ' silent' : ''}`;
   el.dataset.id = row.item.id;
   el.dataset.index = String(row.index);
   placeItem(el, row, total);
@@ -1324,6 +1330,12 @@ function buildItem(row, trackId, total, cache) {
   });
 
   el.append(name, time, drop);
+  if (level < 1) {
+    const badge = document.createElement('div');
+    badge.className = 'track-item-gain';
+    badge.textContent = level === 0 ? 'muted' : `${Math.round(level * 100)}%`;
+    el.append(badge);
+  }
   cache.rows.set(row.item.id, { el, name, time });
   el.addEventListener('click', () => selectItem(row.item.id).catch(fail));
   el.addEventListener('dragstart', (event) => {
@@ -1525,6 +1537,7 @@ export async function selectItem(id) {
   pause();
   stopSequence();
   S.activeItemId = id;
+  S.boundary = null;     // the panel follows the selection
   S.seqPlayhead = row.start;
   S.view = 'sequence';   // clicking an item means you want to watch the sequence
 
@@ -1754,7 +1767,7 @@ export async function playSequence() {
       preroll(rows[i + 1]);
       const from = sequence.sourceTime(row, Math.max(origin, row.start));
 
-      if (!S.muted) {
+      if (!S.muted && itemLevel(row.item) > 0) {
         const sound = await media.audioOf(entry);
         if (sound) {
           audio.schedule({
@@ -1763,6 +1776,7 @@ export async function playSequence() {
             to: row.item.out,
             startAt: startAt + (Math.max(origin, row.start) - origin) / rate,
             signal: stopping.signal,
+            destination: levelSink(row.item),
             rate,
           }).catch(fail);
         }
@@ -1836,6 +1850,7 @@ export async function playSequence() {
 function scheduleLane(lane, origin, startAt, rate, signal) {
   for (const row of audioRows(lane)) {
     if (row.end <= origin) continue;
+    if (itemLevel(row.item) <= 0) continue;
     const source = sourceById(row.item.sourceId);
     if (!source) continue;
     const from = row.item.in + Math.max(0, origin - row.start);
@@ -1848,6 +1863,7 @@ function scheduleLane(lane, origin, startAt, rate, signal) {
         to: row.item.out,
         startAt: startAt + (Math.max(origin, row.start) - origin) / rate,
         signal,
+        destination: levelSink(row.item),
         rate,
       });
     }).catch(fail);
@@ -1951,12 +1967,20 @@ function renderEffects() {
   const list = transitions.boundaries(sequenceRows());
   const boundary = S.boundary && list.find((b) => b.key === S.boundary.key);
   S.boundary = boundary ?? null;
-  tabEffects.disabled = !list.length;
+  const item = selectedItem();
+  tabEffects.disabled = !list.length && !item;
+
+  // The panel shows whatever is selected on the sequence: a joint's transition,
+  // or a clip's own sound.
+  transitionBox.hidden = !boundary;
+  clipAudioBox.hidden = !!boundary || !item;
+
   if (!boundary) {
     effectList.replaceChildren();
-    effectWhere.textContent = 'Nothing selected';
-    effectAt.textContent = '';
+    effectWhere.textContent = item ? item.label : 'Nothing selected';
+    effectAt.textContent = item ? timecode(itemDuration(item)) : '';
     effectDurationWrap.hidden = true;
+    if (item) renderItemAudio(item);
     return;
   }
 
@@ -1989,6 +2013,61 @@ function renderEffects() {
     effectDurationValue.textContent = `${current.duration.toFixed(2)}s`;
   }
 }
+
+// ─── A clip's own sound ──────────────────────────────────────────────────────
+// Per item, so a noisy take can sit under music without touching anything else.
+// The preview and the render read the same number, so what you hear is what
+// comes out.
+
+const selectedItem = () => allItems().find((i) => i.id === S.activeItemId) ?? null;
+const itemDuration = (item) => Math.max(0, item.out - item.in);
+
+/** What an item should actually be played at. */
+export const itemLevel = (item) => (item?.muted ? 0 : item?.gain ?? 1);
+
+/**
+ * Where an item's sound should be sent. Null means straight out at full level;
+ * a gain node otherwise. Callers skip scheduling entirely at zero, since a
+ * silent node still costs a decode.
+ */
+function levelSink(item) {
+  const level = itemLevel(item);
+  if (level >= 1) return null;
+  const ctx = audio.audio();
+  const node = ctx.createGain();
+  node.gain.value = level;
+  node.connect(ctx.destination);
+  return node;
+}
+
+function renderItemAudio(item) {
+  const level = item.gain ?? 1;
+  itemMute.dataset.state = item.muted ? 'off' : 'on';
+  itemMute.setAttribute('aria-label', item.muted ? 'Unmute this clip' : 'Mute this clip');
+  if (Number(itemGain.value) !== level) itemGain.value = String(level);
+  itemGain.disabled = !!item.muted;
+  itemGainValue.textContent = `${Math.round(level * 100)}%`;
+}
+
+export async function setItemAudio(id, { gain, muted } = {}) {
+  const item = allItems().find((i) => i.id === id);
+  if (!item) return null;
+  if (gain !== undefined) item.gain = clamp(gain, 0, 1);
+  if (muted !== undefined) item.muted = !!muted;
+  updateUI();
+  await saveLanes();
+  return item;
+}
+
+itemGain.addEventListener('input', () => {
+  itemGainValue.textContent = `${Math.round(Number(itemGain.value) * 100)}%`;
+  if (S.activeItemId) setItemAudio(S.activeItemId, { gain: Number(itemGain.value) }).catch(fail);
+});
+
+itemMute.addEventListener('click', () => {
+  const item = selectedItem();
+  if (item) setItemAudio(item.id, { muted: !item.muted }).catch(fail);
+});
 
 effectDuration.addEventListener('input', () => {
   const current = transitionAt(S.boundary);
@@ -3006,7 +3085,7 @@ Object.assign(window, {
   setTracksHeight,
   boot, openProject, newProject, renameProject, dropProject, setSettings, outputShape,
   cancelExport, transitions, transitionAt, setTransition, selectBoundary,
-  addAudioTrack, removeAudioTrack, moveBetweenLanes,
+  addAudioTrack, removeAudioTrack, moveBetweenLanes, setItemAudio, itemLevel,
   liveSyncActiveClip,
   refreshPreview,
   audio, setMusic, setMusicFromSource, removeMusic, setMusicGain, setMuted, setRate,

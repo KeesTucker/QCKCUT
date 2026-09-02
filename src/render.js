@@ -301,6 +301,12 @@ async function mixAudio(lanes, sourceOf, total, music, onProgress, signal) {
 async function scheduleRow(context, row, sourceOf, total) {
   const source = sourceOf(row.item);
   if (!source) return false;
+
+  // Per-item level, the same number the preview uses. Zero is skipped outright:
+  // a silent node still costs a decode.
+  const level = row.item.muted ? 0 : row.item.gain ?? 1;
+  if (level <= 0) return false;
+
   return media.using(source, async ({ input }) => {
     const track = await input.getPrimaryAudioTrack();
     if (!track || !(await track.canDecode())) return false;
@@ -317,7 +323,13 @@ async function scheduleRow(context, row, sourceOf, total) {
 
       const node = context.createBufferSource();
       node.buffer = buffer;
-      node.connect(context.destination);
+      if (level < 1) {
+        const gain = context.createGain();
+        gain.gain.value = level;
+        node.connect(gain).connect(context.destination);
+      } else {
+        node.connect(context.destination);
+      }
       node.start(at, offset, Math.min(buffer.duration - offset, room));
     }
     return true;

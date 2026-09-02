@@ -19,7 +19,7 @@ Package manager is **pnpm** (pinned in `packageManager`).
 ```bash
 pnpm install
 pnpm dev              # Vite on http://localhost:5173
-pnpm test             # the gate: 257 Playwright tests in real Chrome
+pnpm test             # the gate: 265 Playwright tests in real Chrome
 pnpm build            # production bundle into dist/
 pnpm preview          # serve that bundle
 pnpm test:report      # open the HTML report
@@ -521,6 +521,17 @@ follows its trims, so the timeline shows the clip you have rather than the one
 you had when you dragged it on. Items dragged straight from a source have no
 `clipId` and are never touched, and deleting a clip costs its items nothing
 because they hold their own range.
+
+## The Effects tab follows the selection
+
+It shows a joint's transition when a joint is selected, and the selected clip's
+own sound otherwise. `selectItem()` clears `S.boundary` so the panel follows
+what you clicked.
+
+A clip carries `gain` (0..1) and `muted`. `itemLevel()` is the one place that
+resolves them, and both playback and the render read it, so what you hear is
+what comes out. Zero is skipped rather than scheduled at silence: a silent node
+still costs a decode.
 
 ## Transitions
 

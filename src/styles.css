@@ -1098,3 +1098,42 @@ body.resizing { cursor: ns-resize; user-select: none; }
 
 /* Breathing room under the last lane. */
 .sequence { padding-bottom: 10px; }
+
+/* Per-clip controls in the Effects tab */
+.effect-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 14px 2px;
+}
+.effect-label {
+  font-size: 10px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.effect-row .ctl { width: 28px; height: 28px; border: 1px solid var(--line); }
+.effect-row .ctl:hover { border-color: var(--accent); color: var(--accent); }
+.effect-row .ctl[data-state="off"] { border-color: var(--accent); color: var(--accent); }
+
+.effect-note {
+  margin: 0;
+  padding: 4px 14px 14px;
+  color: var(--dim);
+  font-size: 11px;
+  line-height: 1.5;
+}
+#clipAudioBox[hidden], #transitionBox[hidden] { display: none; }
+
+/* A muted or quietened item says so on the track */
+.track-item.silent { opacity: .55; }
+.track-item-gain {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  color: var(--dim);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
