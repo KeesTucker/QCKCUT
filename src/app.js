@@ -284,7 +284,19 @@ export async function play() {
   S.playing = true;
   updatePlayButton();
 
-  const from = S.playhead >= S.out - 0.02 ? S.in : S.playhead;
+  // Where to play from and to.
+  //
+  // Marking a clip leaves its range selected, and playing that range is what
+  // you want while you are working on it. But scrubbing away from it and
+  // pressing play used to jump back to the clip's start, which made scrubbing
+  // feel like it did nothing. So the range only governs playback while the
+  // playhead is actually inside it; outside, you get what you are looking at.
+  const source = active();
+  const atEnd = S.playhead >= source.duration - 0.02;
+  const inside = S.playhead >= S.in && S.playhead < S.out - 0.02;
+  const from = atEnd ? S.in : S.playhead;
+  const to = inside || atEnd ? S.out : source.duration;
+
   const stopping = new AbortController();
   playRun = stopping;
 
@@ -297,7 +309,7 @@ export async function play() {
     const ctx = audio.unlock();
     const startAt = ctx.currentTime + 0.06;   // a beat to get the first buffer out
     elapsed = audio.audioClock(startAt, rate);
-    audio.schedule({ sink: sound.sink, from, to: S.out, startAt, signal: stopping.signal, rate })
+    audio.schedule({ sink: sound.sink, from, to, startAt, signal: stopping.signal, rate })
       .catch(fail);
   }
 
@@ -308,15 +320,15 @@ export async function play() {
       paintSilence(active()?.name);
       while (S.playing) {
         const at = from + elapsed();
-        S.playhead = Math.min(at, S.out);
+        S.playhead = Math.min(at, to);
         updateTransport();
-        if (at >= S.out) break;
+        if (at >= to) break;
         await sleep(40);
       }
     } finally {
       stopping.abort();
       if (playRun === stopping) playRun = null;
-      if (S.playing) { S.playhead = S.out; updateTransport(); }
+      if (S.playing) { S.playhead = to; updateTransport(); }
       pause();
     }
     return;
@@ -324,7 +336,7 @@ export async function play() {
 
   let painted = false;
   try {
-    for await (const sample of held.sink.samples(from, S.out)) {
+    for await (const sample of held.sink.samples(from, to)) {
       try {
         if (!S.playing) break;
         const due = sample.timestamp - from;
@@ -347,7 +359,7 @@ export async function play() {
     stopping.abort();
     if (playRun === stopping) playRun = null;
     if (S.playing) {
-      S.playhead = S.out;
+      S.playhead = to;
       updateTransport();
     }
     pause();

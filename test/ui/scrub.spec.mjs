@@ -72,3 +72,70 @@ test('keyboard steps a frame and jumps a second', async ({ app }) => {
   await app.page.keyboard.press('Shift+ArrowLeft');
   await expect.poll(async () => (await app.state()).playhead).toBeCloseTo(3 + 1 / 30 - 1, 2);
 });
+
+// Regression: marking a clip leaves its range selected, and play used to jump
+// back to that range's start whenever the playhead was past its out point. So
+// scrubbing ahead and pressing play replayed the last clip, and scrubbing felt
+// like it did nothing.
+test('playing after scrubbing past a clip continues from the playhead', async ({ app }) => {
+  await app.add('hd');                       // ten seconds
+  await app.page.evaluate(() => window.seek(1));
+  await app.page.keyboard.press('c');
+  await app.page.evaluate(() => window.seek(3));
+  await app.page.keyboard.press('c');        // clip is 1..3, and selected
+  expect((await app.state()).clips).toHaveLength(1);
+
+  await app.page.evaluate(() => window.seek(6));
+  const result = await app.page.evaluate(async () => {
+    const playing = window.play();
+    await new Promise((r) => setTimeout(r, 500));
+    window.pause();
+    await playing;
+    return window.S.playhead;
+  });
+
+  expect(result, 'playback jumped back to the clip').toBeGreaterThan(6);
+});
+
+test('playing inside a marked clip still stops at its out point', async ({ app }) => {
+  await app.add('hd');
+  await app.page.evaluate(() => window.seek(1));
+  await app.page.keyboard.press('c');
+  await app.page.evaluate(() => window.seek(2));
+  await app.page.keyboard.press('c');        // clip is 1..2
+
+  await app.page.evaluate(() => window.seek(1.2));
+  const head = await app.page.evaluate(async () => {
+    await window.play();
+    return window.S.playhead;
+  });
+  expect(head).toBeCloseTo(2, 1);
+});
+
+test('scrubbing before the in point plays from there, not from in', async ({ app }) => {
+  await app.add('hd');
+  await app.page.evaluate(() => { window.S.in = 5; window.S.out = 7; });
+  await app.page.evaluate(() => window.seek(1));
+
+  const result = await app.page.evaluate(async () => {
+    const playing = window.play();
+    await new Promise((r) => setTimeout(r, 400));
+    window.pause();
+    await playing;
+    return window.S.playhead;
+  });
+  expect(result).toBeGreaterThan(1);
+  expect(result, 'it jumped to the in point').toBeLessThan(4);
+});
+
+test('playing from the very end restarts at the in point', async ({ app }) => {
+  await app.add('land');                     // six seconds
+  await app.page.evaluate(() => { window.S.in = 1; window.S.out = 2; });
+  await app.page.evaluate(() => window.seek(6));
+
+  const head = await app.page.evaluate(async () => {
+    await window.play();
+    return window.S.playhead;
+  });
+  expect(head).toBeCloseTo(2, 1);
+});

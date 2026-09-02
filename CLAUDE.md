@@ -19,7 +19,7 @@ Package manager is **pnpm** (pinned in `packageManager`).
 ```bash
 pnpm install
 pnpm dev              # Vite on http://localhost:5173
-pnpm test             # the gate: 242 Playwright tests in real Chrome
+pnpm test             # the gate: 246 Playwright tests in real Chrome
 pnpm build            # production bundle into dist/
 pnpm preview          # serve that bundle
 pnpm test:report      # open the HTML report
@@ -533,6 +533,18 @@ Joints live in their own lane along the bottom of the track. They were first
 drawn across its full height, which put them on top of the ruler (the scrub
 surface) and on top of each item's remove button, since a cut lands exactly on
 both.
+
+## What Play plays
+
+The marked range governs playback **only while the playhead is inside it**.
+Outside it, playback runs from the playhead to the end of the source, and from
+the very end it restarts at the in point.
+
+Marking a clip leaves its range selected, which is right while you are working
+on that clip. But the rule used to be "past the out point, jump back to in", so
+scrubbing ahead and pressing play silently replayed the last clip and scrubbing
+felt like it did nothing. Switching source and back appeared to fix it only
+because `setActive()` resets the range.
 
 ## Marking a clip
 
