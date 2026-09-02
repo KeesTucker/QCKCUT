@@ -19,7 +19,7 @@ Package manager is **pnpm** (pinned in `packageManager`).
 ```bash
 pnpm install
 pnpm dev              # Vite on http://localhost:5173
-pnpm test             # the gate: 188 Playwright tests in real Chrome
+pnpm test             # the gate: 190 Playwright tests in real Chrome
 pnpm build            # production bundle into dist/
 pnpm preview          # serve that bundle
 pnpm test:report      # open the HTML report
@@ -190,7 +190,16 @@ generator resolves before a single item is consumed, releasing the decoder while
 it is still needed. `media.tiles()` acquires and releases by hand for that
 reason.
 
-### Filmstrips build one at a time
+### Filmstrips build one at a time, and only once
+
+`queueStrip()` is **idempotent per source**. `setActive()` queues a build for a
+source that has no strip yet, and both `addSource()` and `restore()` queue one
+themselves straight after, so without the guard the strip filled left to right
+and then immediately did it all again.
+
+`stripsIdle()` counts queued builds as well as running ones, or a build that has
+not started yet looks like no work at all.
+
 
 `evict()` will not close an in-use entry, so N parallel builds each holding a
 decoder exhausts the pool with nothing evictable. `queueStrip()` serialises them

@@ -148,3 +148,59 @@ test('deleting one of several repaints with the one that takes over', async ({ a
   });
   expect(brightest).toBeGreaterThan(40);
 });
+
+// Regression: setActive() queues a filmstrip for a source that has none, and
+// addSource() queued another straight after, so the strip filled left to right
+// and then did it all again. Watch the tile count: it must only ever grow.
+test('a filmstrip is built once, not twice', async ({ app }) => {
+  const restarts = await app.page.evaluate(async () => {
+    const blob = await (await fetch('/test/media/land.mp4')).blob();
+
+    let restarts = 0;
+    let last = 0;
+    const timer = setInterval(() => {
+      const source = window.S.sources[0];
+      if (!source) return;
+      const n = source.thumbs.length;
+      if (n < last) restarts++;      // the strip started over
+      last = n;
+    }, 4);
+
+    await window.addSource(new File([blob], 'land.mp4', { type: 'video/mp4' }));
+    while (!window.snapshot().stripsIdle) await new Promise((r) => setTimeout(r, 30));
+    await new Promise((r) => setTimeout(r, 150));
+    clearInterval(timer);
+    return restarts;
+  });
+
+  expect(restarts, 'the filmstrip rebuilt itself').toBe(0);
+  const s = await app.state();
+  expect(s.sources[0].thumbsDecoded).toBe(s.sources[0].thumbCount);
+});
+
+test('a restored project does not rebuild the first strip', async ({ app }) => {
+  await app.add('land', 'port');
+  await app.page.reload();
+  await app.page.waitForFunction(() => window.S?.project);
+
+  const restarts = await app.page.evaluate(async () => {
+    let restarts = 0;
+    const last = new Map();
+    const timer = setInterval(() => {
+      for (const source of window.S.sources) {
+        const n = source.thumbs.length;
+        if (n < (last.get(source.id) ?? 0)) restarts++;
+        last.set(source.id, n);
+      }
+    }, 4);
+    while (!window.snapshot().stripsIdle || !window.S.sources.length) {
+      await new Promise((r) => setTimeout(r, 30));
+    }
+    await new Promise((r) => setTimeout(r, 150));
+    clearInterval(timer);
+    return restarts;
+  });
+
+  // restore() queues every source, and setActive() had already queued the first.
+  expect(restarts).toBe(0);
+});

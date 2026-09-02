@@ -346,8 +346,18 @@ const stripRuns = new Map();
 // once would exhaust it exactly the way we are trying to avoid.
 let stripQueue = Promise.resolve();
 
+// Idempotent per source. setActive() queues a build for a source that has no
+// strip yet, and both addSource() and restore() then queue one themselves, so
+// without this the strip fills left to right and immediately does it again.
+const stripQueued = new Set();
+
 export function queueStrip(source) {
-  stripQueue = stripQueue.then(() => buildStrip(source)).catch(fail);
+  if (stripQueued.has(source.id)) return stripQueue;
+  stripQueued.add(source.id);
+  stripQueue = stripQueue
+    .then(() => buildStrip(source))
+    .catch(fail)
+    .finally(() => stripQueued.delete(source.id));
   return stripQueue;
 }
 
@@ -402,7 +412,7 @@ async function buildWaveform(source, signal) {
 }
 
 /** True when no filmstrip is still decoding. For tests. */
-export const stripsIdle = () => stripRuns.size === 0;
+export const stripsIdle = () => stripRuns.size === 0 && stripQueued.size === 0;
 
 export function drawStrip() {
   const source = active();
@@ -2048,6 +2058,7 @@ function forgetProject() {
   trackShape = null;
   sourcesShape = null;
   sourceRows = new Map();
+  stripQueued.clear();
   nextId = 1;
 
   // The canvas holds whatever it last painted, so without this a new project
