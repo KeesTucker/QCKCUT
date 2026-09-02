@@ -19,13 +19,27 @@ const EPSILON = 1e-6;
 const AUDIO_RATE = 48_000;
 const AUDIO_CHANNELS = 2;
 
-/** Render one range of one source. Keeps the source's audio. */
-export async function renderClip(source, start, end, onProgress) {
+/**
+ * Render one range of one source. Keeps the source's audio, and passes packets
+ * through untouched unless the output settings ask for a different shape.
+ */
+export async function renderClip(source, start, end, onProgress, settings = {}) {
   // A fresh Input so export never disturbs the preview pool.
   const input = new Input({ source: new BlobSource(source.blob), formats: ALL_FORMATS });
   try {
     const output = new Output({ format: new Mp4OutputFormat(), target: new BufferTarget() });
-    const conversion = await Conversion.init({ input, output, trim: { start, end } });
+    const video = {};
+    if (settings.width && settings.height) {
+      Object.assign(video, { width: settings.width, height: settings.height, fit: 'contain' });
+    }
+    if (settings.fps) video.frameRate = settings.fps;
+
+    const conversion = await Conversion.init({
+      input,
+      output,
+      trim: { start, end },
+      ...(Object.keys(video).length ? { video } : {}),
+    });
     if (onProgress) conversion.onProgress = onProgress;
     await conversion.execute();
     return new Blob([output.target.buffer], { type: 'video/mp4' });
@@ -39,7 +53,7 @@ export async function renderClip(source, start, end, onProgress) {
  * resolves an item to its source. Output takes the first item's dimensions;
  * everything else is letterboxed into them.
  */
-export async function renderSequence(rows, sourceOf, onProgress, music = null, shape = null) {
+export async function renderSequence(rows, sourceOf, onProgress, music = null, shape = null, fps = null) {
   if (!rows.length) throw new Error('the sequence is empty');
   // The caller picks the shape, because the first item may be audio and have
   // no dimensions of its own.
@@ -79,6 +93,32 @@ export async function renderSequence(rows, sourceOf, onProgress, music = null, s
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       await video.add(row.start, row.duration);
       onProgress?.(Math.min(1, row.end / total));
+      continue;
+    }
+
+    // A fixed frame rate is a resample: ask for the exact instants the output
+    // needs rather than passing the source's own timings through.
+    if (fps) {
+      await media.using(source, async ({ track }) => {
+        const sink = new VideoSampleSink(track);
+        const count = Math.max(1, Math.round(row.duration * fps));
+        const times = Array.from({ length: count }, (_, k) => row.item.in + k / fps);
+        let k = 0;
+        for await (const sample of sink.samplesAtTimestamps(times)) {
+          const at = row.start + k / fps;
+          k++;
+          if (!sample) continue;
+          try {
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            sample.drawWithFit(ctx, { fit: 'contain' });
+            await video.add(at, 1 / fps);
+            onProgress?.(Math.min(1, at / total));
+          } finally {
+            sample.close();
+          }
+        }
+      });
       continue;
     }
 

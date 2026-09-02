@@ -12,7 +12,13 @@
 <header class="bar">
   <h1>QCKCUT</h1>
   <button class="help-btn" id="helpBtn" aria-label="Help" aria-haspopup="dialog" title="Help">?</button>
-  <span id="fileName" class="filename">no clip</span>
+
+  <span class="divider"></span>
+  <span id="projectName" class="project-name" tabindex="0">Untitled</span>
+  <button id="newProject" class="ghost text">New</button>
+  <button id="openProject" class="ghost text">Open</button>
+  <button id="settingsBtn" class="ghost text">Settings</button>
+
   <span class="spacer"></span>
   <span id="status" class="status"></span>
   <button id="exportBtn" disabled>Export</button>
@@ -31,7 +37,7 @@
 
   <section id="stage" class="stage">
     <canvas id="preview"></canvas>
-    <div id="viewBadge" class="badge hidden"><span id="viewKind">Source</span><span id="viewName"></span></div>
+    <div id="viewBadge" class="badge hidden"><span id="viewKind">Source</span><span id="viewName"></span><span id="viewMeta"></span></div>
 
     <div id="controls" class="controls hidden">
       <button id="playBtn" class="ctl" data-state="paused" aria-label="Play" title="Play or pause (Space)" disabled>
@@ -133,6 +139,15 @@
     <div class="help-body">
 
       <section>
+        <h4>Projects</h4>
+        <p>Everything lives in a project, named in the top left: double-click the
+        name to change it. <kbd>New</kbd> starts an empty one, <kbd>Open</kbd>
+        lists the rest. Each is stored separately in this browser, so switching
+        does not disturb the others. <kbd>Settings</kbd> sets the resolution and
+        frame rate of what you export.</p>
+      </section>
+
+      <section>
         <h4>Sources</h4>
         <p>Drop video <em>or audio</em> files anywhere on the page, or press <kbd>+</kbd> in the
         Sources panel. Audio is a source like any other: it gets a waveform instead of a
@@ -216,6 +231,53 @@
         </table>
       </section>
 
+    </div>
+  </div>
+</div>
+
+<div class="help-overlay" id="projectsOverlay">
+  <div class="help-box" role="dialog" aria-modal="true" aria-labelledby="projectsTitle">
+    <div class="help-head">
+      <h3 id="projectsTitle">Projects</h3>
+      <button class="icon-btn" id="projectsCloseBtn" aria-label="Close">&#10005;</button>
+    </div>
+    <div class="help-body">
+      <ul id="projectList" class="list plain"></ul>
+    </div>
+  </div>
+</div>
+
+<div class="help-overlay" id="settingsOverlay">
+  <div class="help-box" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <div class="help-head">
+      <h3 id="settingsTitle">Output</h3>
+      <button class="icon-btn" id="settingsCloseBtn" aria-label="Close">&#10005;</button>
+    </div>
+    <div class="help-body">
+      <section>
+        <h4>Resolution</h4>
+        <select id="resSel" class="setting">
+          <option value="auto">Match the source</option>
+          <option value="3840x2160">3840 &times; 2160 &middot; 4K</option>
+          <option value="1920x1080">1920 &times; 1080 &middot; 1080p</option>
+          <option value="1280x720">1280 &times; 720 &middot; 720p</option>
+          <option value="1080x1920">1080 &times; 1920 &middot; vertical</option>
+          <option value="1080x1080">1080 &times; 1080 &middot; square</option>
+        </select>
+        <p>Anything shaped differently is letterboxed into it, never stretched.</p>
+      </section>
+      <section>
+        <h4>Frame rate</h4>
+        <select id="fpsSel" class="setting">
+          <option value="auto">Match the source</option>
+          <option value="24">24</option>
+          <option value="25">25</option>
+          <option value="30">30</option>
+          <option value="60">60</option>
+        </select>
+        <p>Matching the source keeps every frame exactly where it was, which is
+        usually what you want. Pick a rate only when something downstream needs one.</p>
+      </section>
     </div>
   </div>
 </div>

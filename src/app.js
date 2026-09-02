@@ -30,6 +30,8 @@ const S = {
   muted: false,
   rate: 1,          // preview speed; never affects the export
   view: 'source',   // which of the two things the viewer is showing
+  project: null,    // { id, name }
+  settings: { width: null, height: null, fps: null },   // null means match the source
 };
 
 const MIN_RANGE = 0.05;   // shortest selection we allow, seconds
@@ -73,6 +75,11 @@ const rateSel = $('rateSel');
 const viewBadge = $('viewBadge');
 const viewKind = $('viewKind');
 const viewName = $('viewName');
+const viewMeta = $('viewMeta');
+const projectNameEl = $('projectName');
+const projectList = $('projectList');
+const resSel = $('resSel');
+const fpsSel = $('fpsSel');
 const sequenceEl = document.querySelector('.sequence');
 const seqRuler = $('seqRuler');
 const seqPlayheadEl = $('seqPlayheadEl');
@@ -87,7 +94,6 @@ const musicName = $('musicName');
 const musicDrop = $('musicDrop');
 const musicTrack = $('musicTrack');
 const mctx = musicTrack.getContext('2d');
-const fileNameEl = $('fileName');
 const statusEl = $('status');
 const timeEl = $('time');
 const rangeEl = $('range');
@@ -446,11 +452,6 @@ function updateTransport() {
   playheadEl.style.left = `${xForTime(S.playhead)}px`;
 }
 
-/** Header line for a source. Audio has no dimensions worth advertising. */
-const describe = (source) => media.isVideo(source)
-  ? `${source.name} · ${source.width}×${source.height} · ${source.codec ?? '?'}`
-  : `${source.name} · audio · ${source.codec ?? '?'}`;
-
 function updateMark() {
   timeline.classList.toggle('marking', !!S.marking);
   if (S.marking) markEl.style.left = `${xForTime(S.marking.at)}px`;
@@ -753,7 +754,6 @@ function updateUI() {
   // Export renders whatever the viewer is showing, and says so.
   exportBtn.textContent = onSequence ? 'Export sequence' : 'Export clip';
   exportBtn.disabled = S.exporting || (onSequence ? !S.timeline.length : !loaded);
-  fileNameEl.textContent = loaded ? describe(source) : 'no clip';
   renderSources();
   renderClips();
   renderTrack();
@@ -763,6 +763,8 @@ function updateUI() {
   updateView();
   updateTransport();
   updateSeqPlayhead();
+  updateSettings();
+  if (!projectNameEl.dataset.editing) projectNameEl.textContent = S.project?.name ?? 'Untitled';
   drawStrip();
 }
 
@@ -1351,7 +1353,7 @@ export async function exportSequence() {
     const started = performance.now();
     const blob = await render.renderSequence(rows, (item) => sourceById(item.sourceId),
       (p) => setStatus(`rendering sequence ${Math.round(p * 100)}%`), S.music,
-      sequenceShape(rows));
+      outputShape(rows), S.settings.fps);
     const took = (performance.now() - started) / 1000;
     render.download(blob, 'sequence.mp4');
     const total = rows[rows.length - 1].end;
@@ -1649,6 +1651,8 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'm') return setMuted(!S.muted);
   if (event.key === 'Escape') {
     if (helpOpen()) return closeHelp();
+    if (projectsOverlay.classList.contains('visible')) return closeProjects();
+    if (settingsOverlay.classList.contains('visible')) return closeSettings();
     if (cancelMark()) return setHint('');
   }
   if (!held || helpOpen()) return;
@@ -1677,7 +1681,7 @@ export async function exportRange() {
   try {
     const started = performance.now();
     const blob = await render.renderClip(source, S.in, S.out,
-      (p) => setStatus(`exporting ${Math.round(p * 100)}%`));
+      (p) => setStatus(`exporting ${Math.round(p * 100)}%`), S.settings);
     const took = (performance.now() - started) / 1000;
     render.download(blob, exportName(source, S.clips.find((c) => c.id === S.activeClipId)));
     setStatus(`exported ${(blob.size / 1e6).toFixed(1)} MB in ${took.toFixed(1)}s (${((S.out - S.in) / took).toFixed(1)}\u00d7)`);
@@ -1733,6 +1737,9 @@ function updateView() {
   viewName.textContent = showing
     ? `${S.timeline.length} item${S.timeline.length === 1 ? '' : 's'}`
     : (source?.name ?? '');
+  viewMeta.textContent = showing
+    ? timecode(sequence.totalDuration(S.timeline))
+    : (source ? (media.isVideo(source) ? `${source.width}×${source.height}` : 'audio') : '');
   timeline.classList.toggle('watching', !showing);
   sequenceEl.classList.toggle('watching', showing);
 }
@@ -1928,11 +1935,161 @@ window.addEventListener('resize', () => {
   updateView();
   updateTransport();
   updateSeqPlayhead();
+  updateSettings();
+  if (!projectNameEl.dataset.editing) projectNameEl.textContent = S.project?.name ?? 'Untitled';
   // Only devicePixelRatio can change what needs decoding (dragging to a
   // different-density display), and that is rare enough to settle for.
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(drawStrip, 120);
 });
+
+// ─── Projects ────────────────────────────────────────────────────────────────
+// Each project is its own database, so opening one is closing the last and
+// loading from another. Nothing is shared, so nothing can leak between them.
+
+const stamp = () => new Date().toISOString();
+const mintProjectId = () => `${Date.now().toString(36)}${Math.floor(performance.now() * 1000) % 1000}`;
+
+function forgetProject() {
+  pause();
+  stopSequence();
+  stopMusic();
+  media.closeAll();
+  held = null;
+  Object.assign(S, {
+    sources: [], clips: [], timeline: [], music: null,
+    activeId: null, activeClipId: null, activeItemId: null,
+    playhead: 0, in: 0, out: 0, seqPlayhead: 0, marking: null,
+    view: 'source',
+    settings: { width: null, height: null, fps: null },
+  });
+  // Both lists rebuild from scratch, so their caches must not survive.
+  clipsShape = null;
+  trackShape = null;
+  nextId = 1;
+}
+
+export async function openProject(id) {
+  const project = store.projects().find((p) => p.id === id);
+  if (!project) return null;
+  forgetProject();
+  await store.use(id);
+  S.project = { id: project.id, name: project.name };
+  S.settings = (await store.getSettings()) ?? S.settings;
+  updateUI();
+  await restore();
+  updateUI();
+  return S.project;
+}
+
+export async function newProject(name = 'Untitled') {
+  const project = store.createProject(name, mintProjectId(), stamp());
+  await openProject(project.id);
+  return project;
+}
+
+export async function renameProject(name) {
+  if (!S.project || !name) return null;
+  S.project.name = name;
+  store.renameProject(S.project.id, name);
+  updateUI();
+  return S.project;
+}
+
+export async function dropProject(id) {
+  const wasOpen = S.project?.id === id;
+  await store.deleteProject(id);
+  if (!wasOpen) return renderProjects();
+  const next = store.projects()[0];
+  if (next) await openProject(next.id);
+  else await newProject();
+  renderProjects();
+}
+
+function renderProjects() {
+  projectList.replaceChildren(...store.projects().map((project) => {
+    const li = document.createElement('li');
+    const row = document.createElement('div');
+    row.className = `project-row${project.id === S.project?.id ? ' current' : ''}`;
+
+    const name = document.createElement('span');
+    name.textContent = project.name;
+
+    const when = document.createElement('span');
+    when.className = 'when';
+    when.textContent = project.updatedAt ? new Date(project.updatedAt).toLocaleString() : '';
+
+    const remove = document.createElement('button');
+    remove.className = 'item-drop';
+    remove.textContent = '\u00d7';
+    remove.title = 'Delete this project';
+    remove.style.opacity = '1';
+    remove.addEventListener('click', (event) => {
+      event.stopPropagation();
+      dropProject(project.id).catch(fail);
+    });
+
+    row.append(name, when, remove);
+    row.addEventListener('click', () => {
+      closeProjects();
+      if (project.id !== S.project?.id) openProject(project.id).catch(fail);
+    });
+    li.append(row);
+    return li;
+  }));
+}
+
+const projectsOverlay = $('projectsOverlay');
+const openProjects = () => { renderProjects(); projectsOverlay.classList.add('visible'); };
+const closeProjects = () => projectsOverlay.classList.remove('visible');
+
+$('openProject').addEventListener('click', openProjects);
+$('projectsCloseBtn').addEventListener('click', closeProjects);
+projectsOverlay.addEventListener('click', (e) => { if (e.target === projectsOverlay) closeProjects(); });
+$('newProject').addEventListener('click', () => newProject().catch(fail));
+
+renameable(projectNameEl, () => S.project?.name ?? 'Untitled', renameProject);
+
+// ─── Output settings ─────────────────────────────────────────────────────────
+// Null means match the source, which is the default and what most exports want.
+
+export async function setSettings(next) {
+  S.settings = { ...S.settings, ...next };
+  await store.putSettings(S.settings);
+  updateUI();
+  return S.settings;
+}
+
+function updateSettings() {
+  const { width, height, fps } = S.settings;
+  const res = width && height ? `${width}x${height}` : 'auto';
+  if (resSel.value !== res) resSel.value = res;
+  const rate = fps ? String(fps) : 'auto';
+  if (fpsSel.value !== rate) fpsSel.value = rate;
+}
+
+resSel.addEventListener('change', () => {
+  const [width, height] = resSel.value === 'auto' ? [null, null] : resSel.value.split('x').map(Number);
+  setSettings({ width, height }).catch(fail);
+});
+
+fpsSel.addEventListener('change', () => {
+  setSettings({ fps: fpsSel.value === 'auto' ? null : Number(fpsSel.value) }).catch(fail);
+});
+
+const settingsOverlay = $('settingsOverlay');
+const openSettings = () => settingsOverlay.classList.add('visible');
+const closeSettings = () => settingsOverlay.classList.remove('visible');
+
+$('settingsBtn').addEventListener('click', openSettings);
+$('settingsCloseBtn').addEventListener('click', closeSettings);
+settingsOverlay.addEventListener('click', (e) => { if (e.target === settingsOverlay) closeSettings(); });
+
+/** The size a render should come out at: the setting, or the sequence's own. */
+export function outputShape(rows) {
+  const { width, height } = S.settings;
+  return width && height ? { width, height } : sequenceShape(rows);
+}
 
 /** Restore the project from IndexedDB. */
 export async function restore() {
@@ -2002,6 +2159,8 @@ export function snapshot() {
     muted: S.muted,
     rate: S.rate,
     view: S.view,
+    project: S.project ? { ...S.project } : null,
+    settings: { ...S.settings },
     marking: S.marking ? { at: S.marking.at } : null,
     kind: source?.kind ?? null,
     music: S.music
@@ -2023,6 +2182,15 @@ setMuted(false);
 setRate(1);
 updateUI();
 
+/** Open the last project, or make the first one. */
+export async function boot() {
+  const list = store.projects();
+  const wanted = store.activeProject();
+  const id = list.some((p) => p.id === wanted) ? wanted : list[0]?.id;
+  if (id) await openProject(id);
+  else await newProject();
+}
+
 // Test hooks. The UI tests reach in by these names.
 Object.assign(window, {
   S, media, store, snapshot, restore,
@@ -2032,8 +2200,9 @@ Object.assign(window, {
   sequence, render, addToSequence, removeFromSequence, moveInSequence, selectItem,
   appendRange, playSequence, stopSequence, exportSequence, sequenceShape,
   setView, seekSequence, togglePlay, seqTimeForX, exportShowing, warn, clearWarning,
+  boot, openProject, newProject, renameProject, dropProject, setSettings, outputShape,
   audio, setMusic, setMusicFromSource, removeMusic, setMusicGain, setMuted, setRate,
   timecode, parseTimecode, clamp, clipLabel, exportName, setClipRange,
 });
 
-restore().catch(fail);
+boot().catch(fail);

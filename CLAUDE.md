@@ -19,7 +19,7 @@ Package manager is **pnpm** (pinned in `packageManager`).
 ```bash
 pnpm install
 pnpm dev              # Vite on http://localhost:5173
-pnpm test             # the gate: 163 Playwright tests in real Chrome
+pnpm test             # the gate: 178 Playwright tests in real Chrome
 pnpm build            # production bundle into dist/
 pnpm preview          # serve that bundle
 pnpm test:report      # open the HTML report
@@ -102,6 +102,27 @@ lands, which will add only a `start` field for its position on the timeline.
 
 `sourceOf(clip)` and `clipsFor(sourceId)` are the only ways to cross the
 reference. Never denormalise source data onto a clip.
+
+### Each project is its own database
+
+`qckcut-<id>` per project, opened by `store.use(id)`. Switching closes one and
+opens another, and deleting is `deleteDatabase`. The alternative, one database
+with a `projectId` on every record, would put a filter in front of every read
+for no benefit.
+
+The project *list* is small scalar metadata, so it lives in localStorage
+(`qckcut.projects`, `qckcut.active`). Blobs never go near it.
+
+`forgetProject()` must clear the render caches (`clipsShape`, `trackShape`) and
+`nextId` along with the state, or the new project renders against the old
+project's cached shape.
+
+Output settings (`{ width, height, fps }`, null meaning "match the source") live
+in the project's own `settings` store, since they describe that project's
+deliverable. `fps` makes sequence export a **resample**: it asks
+`samplesAtTimestamps()` for the exact instants the output needs rather than
+passing the source's timings through. Clip export gets the same treatment
+through Conversion's `video` options.
 
 ### A source is video or audio
 
@@ -341,6 +362,10 @@ the failure: twice now the "flaky" test was reporting a real ordering bug.
   `INK` in `app.js` mirrors it: keep the two in step.
 - Tests measure canvas colour by **brightness, not channel**, so the palette can
   change without breaking them.
+- Three dialogs share the `.help-overlay` / `.help-box` shell, so selectors in
+  tests must be scoped by overlay id.
+- The header carries the project, not the source: the badge over the picture
+  already names what is showing, and repeating it was noise.
 - The empty-sequence hint is hidden by `.sequence.has-items .empty`, not an
   adjacent-sibling rule: the playhead sits between the track and the hint, and
   the sibling match broke silently when it was added.

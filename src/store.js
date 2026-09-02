@@ -1,20 +1,94 @@
-// Project persistence. Sources hold blobs, which localStorage cannot take, so
-// IndexedDB. Reloading the page restores the project, which is also what makes
-// a no-build dev loop bearable: a save does not cost you a re-import.
+// Project persistence.
+//
+// Each project is its own IndexedDB database, so switching is opening a
+// different one and deleting is deleteDatabase(). The alternative, one database
+// with a projectId on every record, would put a filter in front of every read
+// for no benefit.
+//
+// The project *list* is small scalar metadata, so it lives in localStorage.
+// Blobs never go near it.
 
-const NAME = 'qckcut';
-const VERSION = 4;   // v2 renamed 'cuts' to 'clips'; v3 added 'timeline'; v4 'music'
+const LIST_KEY = 'qckcut.projects';
+const ACTIVE_KEY = 'qckcut.active';
+const DB_NAME = (id) => `qckcut-${id}`;
+const VERSION = 1;
+const STORES = ['sources', 'clips', 'timeline', 'music', 'settings'];
+
 let handle = null;
+let openId = null;
+
+// ─── The project list ────────────────────────────────────────────────────────
+
+export function projects() {
+  try {
+    const list = JSON.parse(localStorage.getItem(LIST_KEY) ?? '[]');
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeProjects(list) {
+  localStorage.setItem(LIST_KEY, JSON.stringify(list));
+}
+
+export function touchProject(id, at) {
+  const list = projects().map((p) => (p.id === id ? { ...p, updatedAt: at } : p));
+  writeProjects(list);
+}
+
+export function createProject(name, id, at) {
+  const project = { id, name, updatedAt: at };
+  writeProjects([project, ...projects()]);
+  return project;
+}
+
+export function renameProject(id, name) {
+  writeProjects(projects().map((p) => (p.id === id ? { ...p, name } : p)));
+}
+
+export async function deleteProject(id) {
+  if (openId === id) await close();
+  writeProjects(projects().filter((p) => p.id !== id));
+  if (activeProject() === id) localStorage.removeItem(ACTIVE_KEY);
+  await new Promise((resolve) => {
+    const request = indexedDB.deleteDatabase(DB_NAME(id));
+    request.onsuccess = request.onerror = request.onblocked = () => resolve();
+  });
+}
+
+export const activeProject = () => localStorage.getItem(ACTIVE_KEY);
+
+/** Point every store call at this project. */
+export async function use(id) {
+  if (openId === id) return;
+  await close();
+  openId = id;
+  localStorage.setItem(ACTIVE_KEY, id);
+}
+
+export async function close() {
+  if (!handle) {
+    openId = null;
+    return;
+  }
+  const db = await handle;
+  db.close();
+  handle = null;
+  openId = null;
+}
+
+// ─── The open project's database ─────────────────────────────────────────────
 
 function db() {
+  if (!openId) throw new Error('no project is open');
   handle ??= new Promise((resolve, reject) => {
-    const request = indexedDB.open(NAME, VERSION);
+    const request = indexedDB.open(DB_NAME(openId), VERSION);
     request.onupgradeneeded = () => {
       const d = request.result;
-      for (const store of ['sources', 'clips', 'timeline', 'music']) {
+      for (const store of STORES) {
         if (!d.objectStoreNames.contains(store)) d.createObjectStore(store, { keyPath: 'id' });
       }
-      if (d.objectStoreNames.contains('cuts')) d.deleteObjectStore('cuts');
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
@@ -74,7 +148,19 @@ export const dropMusic = () => run('music', 'readwrite', (s) => s.delete(MUSIC_K
 export const getMusic = () => run('music', 'readonly', (s) => s.get(MUSIC_KEY));
 
 export async function clearAll() {
-  for (const store of ['sources', 'clips', 'timeline', 'music']) {
-    await run(store, 'readwrite', (s) => s.clear());
-  }
+  for (const store of STORES) await run(store, 'readwrite', (s) => s.clear());
+}
+
+// ─── Output settings ─────────────────────────────────────────────────────────
+// Nulls mean "match the source", which is the default and what most exports
+// want. Stored per project, since it describes that project's deliverable.
+
+const SETTINGS_KEY = 'output';
+
+export const putSettings = (settings) =>
+  run('settings', 'readwrite', (s) => s.put({ ...settings, id: SETTINGS_KEY }));
+
+export async function getSettings() {
+  const row = await run('settings', 'readonly', (s) => s.get(SETTINGS_KEY));
+  return row ? { width: row.width ?? null, height: row.height ?? null, fps: row.fps ?? null } : null;
 }

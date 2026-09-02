@@ -9,10 +9,22 @@ export const test = base.extend({
     page.on('pageerror', (e) => errors.push(String(e)));
     page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
 
-    // Each test starts from an empty project.
+    // Each test starts from a clean slate: no projects, no databases. Projects
+    // are separate databases, so clearing one store is no longer enough.
     await page.goto('/');
-    await page.evaluate(() => window.store.clearAll());
+    await page.evaluate(async () => {
+      await window.store.close();
+      localStorage.clear();
+      const dbs = await indexedDB.databases();
+      await Promise.all(dbs
+        .filter((d) => d.name?.startsWith('qckcut'))
+        .map((d) => new Promise((done) => {
+          const request = indexedDB.deleteDatabase(d.name);
+          request.onsuccess = request.onerror = request.onblocked = () => done();
+        })));
+    });
     await page.reload();
+    await page.waitForFunction(() => window.S?.project);
 
     const app = {
       page,

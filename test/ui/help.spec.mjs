@@ -20,7 +20,7 @@ test('help opens with ? and closes with Escape, before any clip is loaded', asyn
 
 test('clicking the backdrop closes help but clicking the panel does not', async ({ app }) => {
   await app.page.locator('#helpBtn').click();
-  await app.page.locator('.help-box').click({ position: { x: 10, y: 10 } });
+  await app.page.locator('#helpOverlay .help-box').click({ position: { x: 10, y: 10 } });
   await expect(overlay(app)).toBeVisible();
 
   await overlay(app).click({ position: { x: 5, y: 5 } });
