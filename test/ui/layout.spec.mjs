@@ -51,20 +51,60 @@ test('nothing is clipped off the bottom of the window', async ({ app }) => {
         const { top, bottom, height } = document.querySelector(sel).getBoundingClientRect();
         return { top, bottom, height };
       };
+      const tracks = document.getElementById('tracks');
       return {
         music: of('#musicTrack'),
         track: of('#track'),
         sequence: of('.sequence'),
+        tracks: of('#tracks'),
+        scroll: tracks.scrollHeight - tracks.clientHeight,
         viewport: window.innerHeight,
       };
     });
     const where = `${size.width}x${size.height}`;
-    expect(boxes.sequence.bottom, `sequence clipped at ${where}`)
+    // The tracks live in a resizable, scrollable column, so what matters is
+    // that the column itself is on screen and its contents are reachable.
+    expect(boxes.tracks.bottom, `tracks clipped at ${where}`)
       .toBeLessThanOrEqual(boxes.viewport + 1);
-    expect(boxes.music.bottom, `music lane clipped at ${where}`)
-      .toBeLessThanOrEqual(boxes.viewport + 1);
+    expect(boxes.tracks.height, `tracks squashed at ${where}`).toBeGreaterThan(120);
+    expect(boxes.sequence.bottom, `sequence unreachable at ${where}`)
+      .toBeLessThanOrEqual(boxes.tracks.bottom + boxes.scroll + 1);
     // And the rows kept their real height rather than being squeezed flat.
     expect(boxes.track.height, `track squashed at ${where}`).toBeGreaterThan(40);
     expect(boxes.music.height, `music lane squashed at ${where}`).toBeGreaterThan(20);
   }
+});
+
+test('the splitter trades height between the picture and the tracks', async ({ app }) => {
+  await app.add('land');
+  const heights = () => app.page.evaluate(() => ({
+    tracks: document.getElementById('tracks').getBoundingClientRect().height,
+    stage: document.getElementById('stage').getBoundingClientRect().height,
+  }));
+
+  const before = await heights();
+  await app.page.evaluate(() => window.setTracksHeight(before => 0));   // ignored arg
+  await app.page.evaluate(() => window.setTracksHeight(document.getElementById('tracks').offsetHeight + 90));
+  const after = await heights();
+
+  expect(after.tracks).toBeGreaterThan(before.tracks + 60);
+  expect(after.stage, 'the picture did not give up the room').toBeLessThan(before.stage - 60);
+});
+
+test('the tracks cannot be dragged away entirely', async ({ app }) => {
+  await app.add('land');
+  await app.page.evaluate(() => window.setTracksHeight(10));
+  const height = await app.page.evaluate(() =>
+    document.getElementById('tracks').getBoundingClientRect().height);
+  expect(height).toBeGreaterThan(120);
+});
+
+test('the chosen height comes back on reload', async ({ app }) => {
+  await app.add('land');
+  await app.page.evaluate(() => window.setTracksHeight(300));
+  await app.page.reload();
+  await app.page.waitForFunction(() => window.S?.project);
+  const height = await app.page.evaluate(() =>
+    document.getElementById('tracks').getBoundingClientRect().height);
+  expect(height).toBeCloseTo(300, -1);
 });

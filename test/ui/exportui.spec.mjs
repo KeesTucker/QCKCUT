@@ -34,7 +34,7 @@ test('the header becomes a progress bar while rendering', async ({ app }) => {
   // And it puts itself away again.
   await expect(bar(app)).toBeHidden();
   await expect(app.page.locator('#menu')).toBeVisible();
-  await expect(button(app)).toHaveText('Export sequence');
+  await expect(button(app)).toHaveText('Export');
   await expect(app.page.locator('body')).not.toHaveClass(/busy/);
 });
 
@@ -113,7 +113,7 @@ test('the app is fully usable again after cancelling', async ({ app }) => {
   });
 
   await expect(app.page.locator('body')).not.toHaveClass(/busy/);
-  await expect(button(app)).toHaveText('Export sequence');
+  await expect(button(app)).toHaveText('Export');
   // Editing works, and so does rendering again.
   await app.page.evaluate(() => window.seek(2));
   expect((await app.state()).playhead).toBeCloseTo(2, 1);
@@ -206,4 +206,32 @@ test('cancelling during the audio mix stops it there', async ({ app }) => {
   expect(result.blob).toBeNull();
   expect(result.downloaded).toBe(false);
   await expect(app.page.locator('#warnTitle')).toHaveText('Render cancelled');
+});
+
+// Pressing Cancel twice could only queue a second cancel, so the button goes
+// dead as soon as the first one lands.
+test('the cancel button stops being clickable once cancelling', async ({ app }) => {
+  test.setTimeout(120_000);
+  await withSequence(app, 8);
+
+  await app.page.evaluate(() => {
+    HTMLAnchorElement.prototype.click = function () {};
+    window.__run = window.exportShowing();
+  });
+  await expect(button(app)).toHaveText('Cancel');
+  await expect(button(app)).toBeEnabled();
+
+  // Read synchronously with the click: cancelExport() is synchronous, and on a
+  // short render the "Cancelling…" window can close before a poll sees it.
+  const during = await app.page.evaluate(() => {
+    const el = document.getElementById('exportBtn');
+    el.click();
+    return { text: el.textContent, disabled: el.disabled, cancelling: window.S.cancelling };
+  });
+  expect(during).toEqual({ text: 'Cancelling…', disabled: true, cancelling: true });
+
+  await app.page.evaluate(() => window.__run);
+  await expect(button(app)).toHaveText('Export');
+  await expect(button(app)).toBeEnabled();
+  expect((await app.state()).cancelling).toBe(false);
 });

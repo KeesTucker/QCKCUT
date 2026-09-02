@@ -25,11 +25,11 @@ test('the filmstrip decodes a tile for every column', async ({ app }) => {
 });
 
 test('controls are disabled until a clip is loaded', async ({ app }) => {
-  for (const id of ['playBtn', 'exportBtn', 'markIn', 'markOut']) {
+  for (const id of ['playBtn', 'exportBtn']) {
     await expect(app.page.locator(`#${id}`)).toBeDisabled();
   }
   await app.add('land');
-  for (const id of ['playBtn', 'exportBtn', 'markIn', 'markOut']) {
+  for (const id of ['playBtn', 'exportBtn']) {
     await expect(app.page.locator(`#${id}`)).toBeEnabled();
   }
 });

@@ -25,7 +25,7 @@ test('the mark buttons warn too rather than acting on a hidden source', async ({
   const before = await app.state();
   await app.page.evaluate(() => window.setView('sequence'));
 
-  await app.page.locator('#markIn').click();
+  await app.page.evaluate(() => window.markIn());
   await expect(toast(app)).toBeVisible();
 
   const after = await app.state();

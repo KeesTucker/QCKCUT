@@ -19,7 +19,7 @@ Package manager is **pnpm** (pinned in `packageManager`).
 ```bash
 pnpm install
 pnpm dev              # Vite on http://localhost:5173
-pnpm test             # the gate: 246 Playwright tests in real Chrome
+pnpm test             # the gate: 257 Playwright tests in real Chrome
 pnpm build            # production bundle into dist/
 pnpm preview          # serve that bundle
 pnpm test:report      # open the HTML report
@@ -427,6 +427,11 @@ the failure: twice now the "flaky" test was reporting a real ordering bug.
   flight, or `await seek(x)` means "queued" and callers read a stale canvas.
 - Only the area the viewer follows shows a playhead. Two white bars moving
   independently are two answers to "where am I".
+- **A playback loop answers to its own run**, never to `S.playing` /
+  `S.playingSeq`. Changing speed stops and restarts playback, and the new run
+  sets the flag back to true before the old loop has noticed, so both painted at
+  once at two different speeds. Each run holds an `AbortController` and checks
+  `live()`; only the current run may write the final state.
 - `updatePlayButton()` is the only thing that sets the play glyph. It is a
   toggle for whichever view is showing, so setting it from inside one playback
   path left sequence playback reading "play" the whole time it ran.
@@ -533,6 +538,21 @@ Joints live in their own lane along the bottom of the track. They were first
 drawn across its full height, which put them on top of the ruler (the scrub
 surface) and on top of each item's remove button, since a cut lands exactly on
 both.
+
+## The bottom half resizes
+
+Everything below the picture lives in `#tracks`, a fixed-height column the
+splitter sets; the picture takes what is left. The height is kept in
+localStorage rather than the project: it is how you like to work, not part of
+the edit. The column scrolls, because lanes pile up faster than anyone drags.
+
+Transition joints live **inside the sequence scrubber**. Over the clips they
+landed on each item's remove button, since a cut is exactly where that button
+sits; in a row of their own they cost height every lane wanted. They have no
+click handler: the ruler underneath takes pointer capture, which retargets the
+compatibility click away from them, so the ruler decides on `pointerup` whether
+the press was a drag (scrub) or a tap (open the transition). For the same
+reason the ruler must **not** `preventDefault()` on `pointerdown`.
 
 ## What Play plays
 

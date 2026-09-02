@@ -118,12 +118,23 @@
 
 </main>
 
-<section class="transport">
-  <button id="markIn" disabled>Mark in</button>
-  <button id="markOut" disabled>Mark out</button>
-  <span id="range" class="time">in 0:00.00 &middot; out 0:00.00</span>
+<div id="splitter" class="splitter" role="separator" aria-orientation="horizontal"
+     aria-label="Resize the tracks" tabindex="0"></div>
+
+<div id="tracks" class="tracks">
+<section class="lane-head source-head">
+  <h2>Source</h2>
   <span class="spacer"></span>
   <span id="hint" class="status"></span>
+  <button id="clipBtn" class="ctl clip-btn" data-state="idle" aria-label="Clip" disabled>
+    <svg class="icon reel" viewBox="0 0 16 16" aria-hidden="true">
+      <rect x="1.2" y="3.2" width="13.6" height="9.6" rx="1.6"/>
+      <rect class="hole" x="3" y="5" width="3.2" height="2.4" rx=".5"/>
+      <rect class="hole" x="3" y="8.6" width="3.2" height="2.4" rx=".5"/>
+      <rect class="hole" x="9.8" y="5" width="3.2" height="2.4" rx=".5"/>
+      <rect class="hole" x="9.8" y="8.6" width="3.2" height="2.4" rx=".5"/>
+    </svg>
+  </button>
 </section>
 
 <section id="timeline" class="timeline empty">
@@ -136,7 +147,7 @@
 </section>
 
 <section class="sequence">
-  <div class="sequence-head">
+  <div class="lane-head sequence-head">
     <h2>Sequence</h2>
     <span id="seqDuration" class="time">0:00.00</span>
     <span class="spacer"></span>
@@ -158,6 +169,8 @@
   </div>
   <canvas id="musicTrack" class="music-track" hidden></canvas>
 </section>
+
+</div>
 
 <div class="help-overlay" id="helpOverlay">
   <div class="help-box" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
@@ -189,8 +202,8 @@
         <h4>Clips</h4>
         <p>Scrub to the start of a moment and press <kbd>C</kbd>. Scrub to the end and press
         <kbd>C</kbd> again to keep it as a clip; <kbd>Esc</kbd> cancels. The selection follows
-        the playhead while you are marking, so you see the clip you are about to make.
-        <kbd>I</kbd> and <kbd>O</kbd> are still there for adjusting a range by hand.</p>
+        the playhead while you are marking, and the chip on the right of the Source bar says
+        whether you are mid-clip. <kbd>I</kbd> and <kbd>O</kbd> adjust a range by hand.</p>
         <p>A clip is only a reference to a start and end time in its source, so making one costs
         nothing and deletes nothing. Click a clip to select it and type exact times into the
         boxes that appear, or drag the handles on the filmstrip. Every clip on the current source
@@ -213,8 +226,8 @@
 
       <section>
         <h4>Transitions</h4>
-        <p>The sequence track has a small handle before the first clip, after the
-        last, and between each pair. Click one and the left panel switches to
+        <p>The scrubber holds a handle before the first clip, after the last, and
+        at every cut. Click one and the left panel switches to
         Effects, where you can fade the sequence up from black, fade it out, or
         dip a cut to black and back. The slider sets how long it takes.</p>
         <p>Every one of these works by darkening the picture that is already

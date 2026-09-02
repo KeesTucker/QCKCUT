@@ -196,22 +196,24 @@ test('export follows the sequence, not the view', async ({ app }) => {
   await app.add('land');
   const button = app.page.locator('#exportBtn');
 
-  // Nothing on the sequence: the marked range is all there is to render.
-  await expect(button).toHaveText('Export clip');
+  // The label never changes; the tooltip says what it will render.
+  await expect(button).toHaveText('Export');
+  await expect(button).toHaveAttribute('title', /marked range/);
   await expect(button).toBeEnabled();
 
   await app.page.evaluate(() => window.setView('sequence'));
-  await expect(button, 'the view must not change what export means').toHaveText('Export clip');
+  await expect(button, 'the view must not change what export means')
+    .toHaveAttribute('title', /marked range/);
 
   // Once the sequence has something, that is the deliverable.
   await app.page.evaluate(() => window.setView('source'));
   await app.page.evaluate(() => { window.S.in = 0; window.S.out = 1; return window.appendRange(); });
-  await expect(button).toHaveText('Export sequence');
+  await expect(button).toHaveAttribute('title', /whole sequence/);
   await expect(button).toBeEnabled();
 
   // Still the sequence, even while watching a source.
   await app.page.evaluate(() => window.setView('source'));
-  await expect(button).toHaveText('Export sequence');
+  await expect(button).toHaveAttribute('title', /whole sequence/);
 });
 
 test('the export button renders the sequence even from source view', async ({ app }) => {

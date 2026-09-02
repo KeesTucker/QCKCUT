@@ -302,7 +302,7 @@ test('a sequence of nothing but sound plays and renders', async ({ app }) => {
   expect(s.timeline).toHaveLength(0);
   expect(s.sequenceDuration).toBeCloseTo(8, 0);
   await expect(app.page.locator('#playBtn')).toBeEnabled();
-  await expect(app.page.locator('#exportBtn')).toHaveText('Export sequence');
+  await expect(app.page.locator('#exportBtn')).toHaveText('Export');
 
   // Trim it short so the render is quick, then check it comes out.
   await app.page.evaluate(() => {
@@ -313,4 +313,30 @@ test('a sequence of nothing but sound plays and renders', async ({ app }) => {
   expect(out.hasAudio).toBe(true);
   expect(out.videoDuration).toBeCloseTo(1, 1);
   expect(out.brightness[0], 'a sound-only sequence should be black').toBeLessThan(20);
+});
+
+// Regression: the transition handles used to live inside the video track's
+// bottom padding, which took that height away from every lane below it.
+test('audio lanes keep their height whatever the transitions do', async ({ app }) => {
+  await setup(app);
+  await appendFrom(app, 'land.mp4', 0, 1);
+  await appendFrom(app, 'land.mp4', 2, 3);
+  await place(app, 'bed.wav');
+
+  const boxes = await app.page.evaluate(() => {
+    const h = (sel) => document.querySelector(sel).getBoundingClientRect().height;
+    return {
+      lane: h('#audioLanes ol.track'),
+      item: h('#audioLanes .track-item'),
+      joints: h('#seqRuler'),
+      video: h('#track'),
+      videoItem: h('#track .track-item'),
+    };
+  });
+
+  // An item fills its lane rather than being squeezed into part of it.
+  expect(boxes.item).toBeGreaterThan(boxes.lane - 2);
+  expect(boxes.videoItem).toBeGreaterThan(boxes.video - 2);
+  expect(boxes.joints, 'the scrubber holding the joints').toBeGreaterThan(12);
+  expect(boxes.item, 'the audio lane is squashed').toBeGreaterThan(30);
 });

@@ -227,6 +227,7 @@ test('joints do not cover the ruler or the item controls', async ({ app }) => {
     };
     return {
       ruler: rect(document.getElementById('seqRuler')),
+      track: rect(document.getElementById('track')),
       joints: [...document.querySelectorAll('.joint')].map(rect),
       drops: [...document.querySelectorAll('#track .track-item-drop')].map(rect),
     };
@@ -234,7 +235,11 @@ test('joints do not cover the ruler or the item controls', async ({ app }) => {
 
   expect(boxes.joints.length).toBeGreaterThan(0);
   for (const joint of boxes.joints) {
-    expect(joint.top, 'a joint is over the scrub ruler').toBeGreaterThanOrEqual(boxes.ruler.bottom);
+    // Inside the scrubber, so they cost no vertical space of their own...
+    expect(joint.top).toBeGreaterThanOrEqual(boxes.ruler.top - 1);
+    expect(joint.bottom).toBeLessThanOrEqual(boxes.ruler.bottom + 1);
+    // ...and clear of the clips, whose remove buttons sit exactly on a cut.
+    expect(joint.bottom, 'a joint overlaps the clips').toBeLessThanOrEqual(boxes.track.top + 1);
     for (const drop of boxes.drops) {
       const overlaps = joint.left < drop.right && joint.right > drop.left
         && joint.top < drop.bottom && joint.bottom > drop.top;

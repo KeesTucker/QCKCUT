@@ -54,9 +54,9 @@ test('seeking lands on the requested time across the whole clip', async ({ app }
 test('mark in and out clamp to a valid range', async ({ app }) => {
   await app.add('land');
   await app.page.evaluate(() => { window.S.playhead = 4; });
-  await app.page.locator('#markIn').click();
+  await app.page.evaluate(() => window.markIn());
   await app.page.evaluate(() => { window.S.playhead = 2; });
-  await app.page.locator('#markOut').click();
+  await app.page.evaluate(() => window.markOut());
 
   const s = await app.state();
   expect(s.in).toBeCloseTo(4, 2);

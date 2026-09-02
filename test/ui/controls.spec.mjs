@@ -165,3 +165,57 @@ test('the button reflects the view it is showing, not the other one', async ({ a
   await app.page.evaluate(() => window.setView('sequence'));
   await expect(app.page.locator('#playBtn')).toHaveAttribute('data-state', 'paused');
 });
+
+// Regression: changing speed stops and restarts playback, but the loops checked
+// the global playing flag, which the new run had already set back to true. Both
+// loops then painted, at two different speeds.
+test('changing speed mid-playback leaves one loop running', async ({ app }) => {
+  await app.add('hd');
+  const result = await app.page.evaluate(async () => {
+    window.S.in = 0;
+    window.S.out = 6;
+    window.S.playhead = 0;
+
+    // Count how many loops are painting by watching the playhead go backwards:
+    // a slower second loop drags it back over ground the faster one covered.
+    let backwards = 0;
+    let last = 0;
+    const watch = setInterval(() => {
+      if (window.S.playhead < last - 0.001) backwards++;
+      last = window.S.playhead;
+    }, 10);
+
+    window.play();
+    await new Promise((r) => setTimeout(r, 400));
+    window.setRate(2);
+    await new Promise((r) => setTimeout(r, 600));
+    window.setRate(0.5);
+    await new Promise((r) => setTimeout(r, 600));
+    window.pause();
+    await new Promise((r) => setTimeout(r, 100));
+    clearInterval(watch);
+    return { backwards, playing: window.S.playing };
+  });
+
+  expect(result.backwards, 'the playhead jumped backwards: two loops').toBe(0);
+  expect(result.playing).toBe(false);
+});
+
+test('a speed change does not leave a stray loop painting after pause', async ({ app }) => {
+  await app.add('hd');
+  const moved = await app.page.evaluate(async () => {
+    window.S.in = 0;
+    window.S.out = 6;
+    window.S.playhead = 0;
+    window.play();
+    await new Promise((r) => setTimeout(r, 300));
+    window.setRate(4);
+    await new Promise((r) => setTimeout(r, 300));
+    window.pause();
+    await new Promise((r) => setTimeout(r, 250));
+    const settled = window.S.playhead;
+    await new Promise((r) => setTimeout(r, 350));
+    return Math.abs(window.S.playhead - settled);
+  });
+  expect(moved, 'something kept playing after pause').toBeLessThan(0.05);
+});

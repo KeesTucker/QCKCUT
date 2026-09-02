@@ -436,13 +436,13 @@ kbd {
   background: var(--panel);
 }
 
-.sequence-head {
+.lane-head {
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 8px 14px;
 }
-.sequence-head h2 {
+.lane-head h2 {
   margin: 0;
   font-size: 11px;
   font-weight: 600;
@@ -450,7 +450,9 @@ kbd {
   text-transform: uppercase;
   color: var(--dim);
 }
-.sequence-head button { padding: 4px 12px; }
+/* Not the icon buttons: they size themselves, and this padding pushed the
+   glyph out of a 26px box entirely. */
+.lane-head button:not(.ctl) { padding: 4px 12px; }
 
 .track-wrap { position: relative; }
 
@@ -461,7 +463,7 @@ kbd {
    space at the end of the track. */
 .track {
   position: relative;
-  height: 68px;
+  height: 52px;
   /* Inset by a margin, not padding: an absolutely positioned child resolves its
      percentages against the padding box, so padding here would shift every item
      off the ruler, which is inset by the same margin. */
@@ -469,7 +471,7 @@ kbd {
   /* Explicitly zeroed: a bare <ol> carries a 40px padding-inline-start from the
      UA sheet, which the absolutely positioned items ignore but everything else
      does not. */
-  padding: 0 0 20px;
+  padding: 0;
   list-style: none;
 }
 
@@ -493,7 +495,7 @@ kbd {
 .track-item {
   position: absolute;
   top: 0;
-  bottom: 20px;
+  bottom: 0;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
@@ -738,9 +740,11 @@ kbd {
 /* Sequence scrubber. Items are draggable for reordering, so the scrub surface
    has to be its own strip or the two gestures fight. */
 .ruler {
-  height: 14px;
+  position: relative;
+  height: 20px;
   margin: 0 14px 4px;
   border-radius: 3px;
+  user-select: none;
   background:
     repeating-linear-gradient(90deg, var(--line) 0 1px, transparent 1px 40px),
     #111;
@@ -752,7 +756,7 @@ kbd {
 .seq-playhead {
   position: absolute;
   top: 0;
-  bottom: 20px;
+  bottom: 0;
   width: 2px;
   margin-left: -1px;
   background: #fff;
@@ -966,15 +970,16 @@ body.busy #exportBtn:hover { background: var(--s3); opacity: 1; }
 .effect-duration[hidden] { display: none; }
 
 /* Boundary handles on the sequence track */
-/* Sat in the lower half of the items on purpose: the ruler above is the scrub
-   surface, and an item's remove button is in its top right corner. A joint at a
-   cut lands exactly on both, and covered them. */
+/* Inside the scrubber. Over the clips they landed on each item's remove button,
+   since a cut is exactly where that button sits; in a row of their own they
+   cost vertical space the lanes need. Dragging across one still scrubs, so the
+   scrub surface is not broken up: see the moved check in the click handler. */
 .joint {
   position: absolute;
+  top: 0;
   bottom: 0;
-  height: 20px;
-  width: 16px;
-  margin-left: -8px;
+  width: 14px;
+  margin-left: -7px;
   z-index: 2;
   display: grid;
   place-items: center;
@@ -983,26 +988,24 @@ body.busy #exportBtn:hover { background: var(--s3); opacity: 1; }
 .joint::after {
   content: "";
   width: 4px;
-  height: 14px;
+  height: 12px;
   border-radius: 2px;
   background: var(--s3);
   border: 1px solid var(--line);
   transition: background .12s, height .12s;
 }
-.joint:hover::after { background: var(--accent); height: 18px; }
+.joint:hover::after { background: var(--accent); height: 16px; }
 .joint.set::after { background: var(--grad); border-color: transparent; }
-.joint.current::after { background: var(--accent); height: 18px; }
+.joint.current::after { background: var(--accent); height: 16px; }
 
 /* Lanes. Each is independently packed from the start, so they stay parallel
    without ever needing a stored start time. */
 .lane { position: relative; }
 
 .track.audio {
-  height: 40px;
-  padding-bottom: 6px;
+  height: 38px;
   margin-top: 4px;
 }
-.track.audio .track-item { bottom: 6px; }
 .track.audio .track-item {
   background: linear-gradient(180deg, #232447, #16172c);
   border-color: #3a3b63;
@@ -1014,7 +1017,7 @@ body.busy #exportBtn:hover { background: var(--s3); opacity: 1; }
 
 .audio-lane .lane-drop {
   position: absolute;
-  top: 6px;
+  top: 8px;
   right: 16px;
   z-index: 2;
   padding: 0 5px;
@@ -1031,7 +1034,7 @@ body.busy #exportBtn:hover { background: var(--s3); opacity: 1; }
 
 .audio-lane .empty-lane {
   position: absolute;
-  inset: 0 16px 6px;
+  inset: 4px 16px 0;
   display: grid;
   align-items: center;
   color: var(--dim);
@@ -1039,3 +1042,59 @@ body.busy #exportBtn:hover { background: var(--s3); opacity: 1; }
   pointer-events: none;
 }
 .track.audio:not(:empty) + .empty-lane { display: none; }
+
+
+/* The Source bar mirrors the Sequence one, so it is obvious which band is
+   which. Its chip says whether a clip is part-marked. */
+.source-head {
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+
+/* The clip button carries the state that the removed text used to: idle, or
+   part way through a clip. */
+.clip-btn {
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--line);
+  color: var(--dim);
+}
+.clip-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.clip-btn[data-state="marking"] {
+  border-color: #ffd23d;
+  background: rgba(255, 210, 61, .14);
+  color: #ffd23d;
+}
+/* A strip of film rather than scissors: it reads as "a piece of footage",
+   which is what a clip is here. */
+.clip-btn .reel rect { fill: currentColor; }
+.clip-btn .reel .hole { fill: var(--panel); }
+.clip-btn[data-state="marking"] .reel .hole { fill: #1c1608; }
+
+
+/* Drag to give the picture or the tracks more room. */
+.splitter {
+  flex: none;
+  height: 6px;
+  cursor: ns-resize;
+  background: var(--bg);
+  border-top: 1px solid var(--line);
+}
+.splitter:hover,
+.splitter:focus-visible { background: var(--s3); outline: none; }
+body.resizing { cursor: ns-resize; user-select: none; }
+
+/* The tracks are a fixed-height column that the splitter sets; the picture
+   takes whatever is left. */
+.tracks {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* Lanes pile up faster than the splitter can be dragged, so the column
+     scrolls rather than hiding whatever does not fit. */
+  overflow-y: auto;
+}
+
+/* Breathing room under the last lane. */
+.sequence { padding-bottom: 10px; }

@@ -29,6 +29,7 @@ const S = {
   out: 0,
   playing: false,
   exporting: false,
+  cancelling: false,
   muted: false,
   rate: 1,          // preview speed; never affects the export
   view: 'source',   // which of the two things the viewer is showing
@@ -81,14 +82,15 @@ const playheadEl = $('playheadEl');
 const markEl = $('markEl');
 const playBtn = $('playBtn');
 const exportBtn = $('exportBtn');
-const markInBtn = $('markIn');
-const markOutBtn = $('markOut');
+const clipBtn = $('clipBtn');
 const addSourceBtn = $('addSource');
 const sourceList = $('sourceList');
 const clipList = $('clipList');
 const track = $('track');
 const audioLanes = $('audioLanes');
 const videoLane = $('videoLane');
+const splitter = $('splitter');
+const tracksEl = $('tracks');
 const seqDurationEl = $('seqDuration');
 const muteBtn = $('muteBtn');
 const rateSel = $('rateSel');
@@ -130,7 +132,6 @@ const musicTrack = $('musicTrack');
 const mctx = musicTrack.getContext('2d');
 const statusEl = $('status');
 const timeEl = $('time');
-const rangeEl = $('range');
 
 // ─── Format helpers (pure) ───────────────────────────────────────────────────
 
@@ -300,6 +301,12 @@ export async function play() {
   const stopping = new AbortController();
   playRun = stopping;
 
+  // Declared before anything that reads it, including the audio-only branch
+  // below. A run answers to itself, not to the global flag: setRate() stops and
+  // restarts playback, and the new run sets S.playing back to true before the
+  // old loop has seen it should stop, so two loops painted at two speeds.
+  const live = () => !stopping.signal.aborted;
+
   // Start the sound first, then take its clock. Video paced against
   // performance.now() drifts against the audio hardware's own timebase.
   const rate = S.rate;
@@ -318,7 +325,7 @@ export async function play() {
     // clock directly until the range ends or playback is stopped.
     try {
       paintSilence(active()?.name);
-      while (S.playing) {
+      while (live()) {
         const at = from + elapsed();
         S.playhead = Math.min(at, to);
         updateTransport();
@@ -326,9 +333,10 @@ export async function play() {
         await sleep(40);
       }
     } finally {
+      const ours = playRun === stopping;
       stopping.abort();
-      if (playRun === stopping) playRun = null;
-      if (S.playing) { S.playhead = to; updateTransport(); }
+      if (ours) playRun = null;
+      if (ours && S.playing) { S.playhead = to; updateTransport(); }
       pause();
     }
     return;
@@ -338,7 +346,7 @@ export async function play() {
   try {
     for await (const sample of held.sink.samples(from, to)) {
       try {
-        if (!S.playing) break;
+        if (!live()) break;
         const due = sample.timestamp - from;
         // elapsed() is media time, so the gap converts to wall time by the rate.
         const wait = ((due - elapsed()) / rate) * 1000;
@@ -346,7 +354,7 @@ export async function play() {
         // the first one or the preview stays blank on a slow start.
         if (wait < -50 && painted) continue;
         if (wait > 0) await sleep(wait);
-        if (!S.playing) break;
+        if (!live()) break;
         paint(sample);
         painted = true;
         S.playhead = sample.timestamp;
@@ -356,13 +364,18 @@ export async function play() {
       }
     }
   } finally {
+    // Only the run that is still current may finish the job; an older one that
+    // was replaced by a speed change must leave the state alone.
+    const ours = playRun === stopping;
     stopping.abort();
-    if (playRun === stopping) playRun = null;
-    if (S.playing) {
-      S.playhead = to;
-      updateTransport();
+    if (ours) {
+      playRun = null;
+      if (S.playing) {
+        S.playhead = to;
+        updateTransport();
+      }
+      pause();
     }
-    pause();
   }
 }
 
@@ -543,6 +556,15 @@ function updateTransport() {
 function updateMark() {
   timeline.classList.toggle('marking', !!S.marking);
   if (S.marking) markEl.style.left = `${xForTime(S.marking.at)}px`;
+
+  // With the mark buttons gone, this is the only thing that says whether a clip
+  // is half-made.
+  clipBtn.disabled = !active();
+  clipBtn.dataset.state = S.marking ? 'marking' : 'idle';
+  clipBtn.title = S.marking
+    ? `Clipping from ${timecode(S.marking.at)} — click or press C to keep it, Esc to cancel`
+    : 'Clip from here (C), then again at the end';
+  clipBtn.setAttribute('aria-label', S.marking ? 'Finish clip' : 'Start clip');
 }
 
 function updateRange() {
@@ -552,7 +574,6 @@ function updateRange() {
   selection.style.width = `${Math.max(0, right - left)}px`;
   handleIn.style.left = `${left}px`;
   handleOut.style.left = `${right}px`;
-  rangeEl.textContent = `in ${timecode(S.in)} · out ${timecode(S.out)} · ${timecode(S.out - S.in)}`;
 }
 
 const sourceMeta = (source) => media.isVideo(source)
@@ -659,13 +680,10 @@ function renderClips() {
 
 /** The clickable joints on the track: sequence start, each cut, sequence end. */
 function renderJoints() {
-  for (const old of track.parentElement.querySelectorAll('.joint')) old.remove();
+  for (const old of seqRuler.querySelectorAll('.joint')) old.remove();
   const rows = sequenceRows();
   const total = rows.length ? rows[rows.length - 1].end : 0;
   if (!total) return;
-
-  const rect = seqRuler.getBoundingClientRect();
-  if (!rect.width) return;
 
   for (const boundary of transitions.boundaries(rows)) {
     const set = transitionAt(boundary);
@@ -673,14 +691,14 @@ function renderJoints() {
     el.className = `joint${set ? ' set' : ''}${S.boundary?.key === boundary.key ? ' current' : ''}`;
     el.dataset.key = boundary.key;
     el.title = `${boundary.label}${set ? `: ${transitions.KINDS[set.type].label}` : ''}`;
-    el.style.left = `${seqRuler.offsetLeft + (boundary.at / total) * rect.width}px`;
-    // The ruler behind it scrubs; a joint is a button, not a scrub surface.
-    el.addEventListener('pointerdown', (event) => event.stopPropagation());
-    el.addEventListener('click', (event) => {
-      event.stopPropagation();
-      selectBoundary(boundary.key);
-    });
-    track.parentElement.append(el);
+    // A percentage of its own row, which is inset exactly like the ruler and
+    // the clips. Measuring the ruler and adding its offset double-counted the
+    // inset once the joints moved into a row of their own.
+    el.style.left = `${(boundary.at / total) * 100}%`;
+    // No listener of its own. The ruler underneath takes pointer capture, which
+    // retargets the compatibility click away from here, so selection is decided
+    // by the ruler on pointerup: see below.
+    seqRuler.append(el);
   }
 }
 
@@ -923,7 +941,6 @@ function updateUI() {
   timeline.classList.toggle('empty', !loaded);
   drop.classList.toggle('hidden', S.sources.length > 0);
   controls.classList.toggle('hidden', !loaded && !S.timeline.length);
-  for (const b of [markInBtn, markOutBtn]) b.disabled = !loaded;
 
   playBtn.disabled = S.view === 'sequence' ? seqTotal() <= 0 : !loaded;
   updatePlayButton();
@@ -931,11 +948,13 @@ function updateUI() {
   // Export follows the sequence, not the view: see exportShowing().
   const hasSequence = seqTotal() > 0;
   if (S.exporting) {
-    exportBtn.textContent = 'Cancel';
-    exportBtn.title = 'Stop the render';
-    exportBtn.disabled = false;   // the one control that must stay live
+    // Once cancelling is under way there is nothing left to press: pressing it
+    // again could only queue a second cancel.
+    exportBtn.textContent = S.cancelling ? 'Cancelling…' : 'Cancel';
+    exportBtn.title = S.cancelling ? 'Stopping the render' : 'Stop the render';
+    exportBtn.disabled = S.cancelling;
   } else {
-    exportBtn.textContent = hasSequence ? 'Export sequence' : 'Export clip';
+    exportBtn.textContent = 'Export';
     exportBtn.title = hasSequence
       ? 'Render the whole sequence'
       : 'Render the marked range. Put something on the sequence to render that instead.';
@@ -1636,9 +1655,20 @@ function scrubSequence(event) {
   scrubSequenceAudio(time).catch(fail);
 }
 
+// Set while a scrub drag is in progress, so a joint can tell a click from the
+// end of a drag that happened to finish on it.
+let scrubMoved = false;
+let pressedJoint = null;
+
 seqRuler.addEventListener('pointerdown', (event) => {
   if (seqTotal() <= 0) return;
-  event.preventDefault();
+  scrubMoved = false;
+  // Which joint the press started on, if any. A drag from here scrubs; a press
+  // that does not move opens that transition.
+  pressedJoint = event.target.closest?.('.joint')?.dataset.key ?? null;
+  // Deliberately not preventDefault(): that suppresses the compatibility click,
+  // and the joints sitting in this ruler listen for exactly that. Text
+  // selection is held off with user-select in CSS instead.
   setView('sequence');
   stopSequence();
   capture(seqRuler, event.pointerId);
@@ -1646,10 +1676,16 @@ seqRuler.addEventListener('pointerdown', (event) => {
 });
 
 seqRuler.addEventListener('pointermove', (event) => {
-  if (seqRuler.hasPointerCapture(event.pointerId)) scrubSequence(event);
+  if (!seqRuler.hasPointerCapture(event.pointerId)) return;
+  scrubMoved = true;
+  scrubSequence(event);
 });
 
-seqRuler.addEventListener('pointerup', () => audio.stopScrub());
+seqRuler.addEventListener('pointerup', () => {
+  audio.stopScrub();
+  if (pressedJoint && !scrubMoved) selectBoundary(pressedJoint);
+  pressedJoint = null;
+});
 
 // Playback across the whole sequence.
 
@@ -1703,10 +1739,13 @@ export async function playSequence() {
     for (const lane of S.audioTracks) scheduleLane(lane, origin, startAt, rate, stopping.signal);
   }
 
+  // Same reasoning as play(): a run answers to itself, not to the global flag.
+  const live = () => !stopping.signal.aborted;
+
   let painted = false;
   try {
     for (const [i, row] of rows.entries()) {
-      if (!S.playingSeq) break;
+      if (!live()) break;
       if (row.end <= origin) continue;
       const source = sourceById(row.item.sourceId);
       if (!source) continue;
@@ -1734,7 +1773,7 @@ export async function playSequence() {
           // Audio item: black picture, and the playhead follows the clock.
           paintSilence(row.item.label);
           painted = true;
-          while (S.playingSeq) {
+          while (live()) {
             const at = origin + elapsed();
             S.seqPlayhead = Math.min(at, row.end);
             updateTransport();
@@ -1747,14 +1786,14 @@ export async function playSequence() {
 
         for await (const sample of entry.sink.samples(from, row.item.out)) {
           try {
-            if (!S.playingSeq) break;
+            if (!live()) break;
             // Clamped for the same reason as in render.js: the frame holding
             // the in point can start before it.
             const at = clamp(row.start + (sample.timestamp - row.item.in), row.start, row.end);
             const wait = ((at - origin - elapsed()) / rate) * 1000;
             if (wait < -50 && painted) continue;
             if (wait > 0) await sleep(wait);
-            if (!S.playingSeq) break;
+            if (!live()) break;
             paint(sample, transitions.dimAt(at, transitionPlan()));
             painted = true;
             S.seqPlayhead = at;
@@ -1771,9 +1810,9 @@ export async function playSequence() {
     // The picture can run out before the sequence does. Keep the playhead
     // moving over black so the audio lanes are heard to their end.
     const pictureEnd = videoEnd();
-    if (S.playingSeq && total > pictureEnd) {
+    if (live() && total > pictureEnd) {
       paintSilence('');
-      while (S.playingSeq) {
+      while (live()) {
         const at = origin + elapsed();
         S.seqPlayhead = Math.min(at, total);
         updateTransport();
@@ -1783,10 +1822,13 @@ export async function playSequence() {
       }
     }
   } finally {
+    const ours = seqRun === stopping;
     stopping.abort();
-    if (seqRun === stopping) seqRun = null;
-    if (S.playingSeq) S.seqPlayhead = total;
-    stopSequence();
+    if (ours) {
+      seqRun = null;
+      if (S.playingSeq) S.seqPlayhead = total;
+      stopSequence();
+    }
   }
 }
 
@@ -1828,6 +1870,7 @@ export async function exportSequence() {
   pause();
   const run = new AbortController();
   exportRun = run;
+  S.cancelling = false;
   // Set before the first await: audio is mixed before any picture is touched,
   // which on a long sequence is seconds with nothing to show for it.
   setBusy(true, 'Mixing audio… 0%');
@@ -1850,6 +1893,7 @@ export async function exportSequence() {
   } finally {
     exportRun = null;
     S.exporting = false;
+    S.cancelling = false;
     setBusy(false);
   }
 }
@@ -2227,23 +2271,29 @@ bindHandle(handleOut, 'out');
 
 playBtn.addEventListener('click', () => togglePlay());
 
-markInBtn.addEventListener('click', () => {
+/** Set the range by hand. The buttons are gone; these are what I and O do. */
+export function markIn() {
   if (!requireSource()) return;
   S.in = clamp(S.playhead, 0, S.out - MIN_RANGE);
-  updateRange();
-  drawStrip();
-  syncActiveClip().catch(fail);
-});
+  afterRangeEdit();
+}
 
-markOutBtn.addEventListener('click', () => {
+export function markOut() {
   if (!requireSource()) return;
   S.out = clamp(S.playhead, S.in + MIN_RANGE, active()?.duration ?? 0);
+  afterRangeEdit();
+}
+
+function afterRangeEdit() {
   updateRange();
+  updateMark();
   drawStrip();
+  liveSyncActiveClip();
   syncActiveClip().catch(fail);
-});
+}
 
 addSourceBtn.addEventListener('click', () => pickFiles());
+clipBtn.addEventListener('click', () => markClip().catch(fail));
 
 document.addEventListener('keydown', (event) => {
   if (event.target.tagName === 'INPUT') return;
@@ -2265,8 +2315,8 @@ document.addEventListener('keydown', (event) => {
   if (event.code === 'Space') { event.preventDefault(); togglePlay(); }
   else if (event.code === 'ArrowLeft') { pause(); seek(S.playhead - (event.shiftKey ? 1 : frame)).catch(fail); }
   else if (event.code === 'ArrowRight') { pause(); seek(S.playhead + (event.shiftKey ? 1 : frame)).catch(fail); }
-  else if (event.key === 'i') markInBtn.click();
-  else if (event.key === 'o') markOutBtn.click();
+  else if (event.key === 'i') markIn();
+  else if (event.key === 'o') markOut();
   else if (event.key === 'c') markClip().catch(fail);
   else if (event.key === 't') appendRange().catch(fail);
 });
@@ -2283,6 +2333,7 @@ export async function exportRange() {
   stopSequence();
   const run = new AbortController();
   exportRun = run;
+  S.cancelling = false;
   setBusy(true, 'Rendering… 0%');
 
   try {
@@ -2300,6 +2351,7 @@ export async function exportRange() {
   } finally {
     exportRun = null;
     S.exporting = false;
+    S.cancelling = false;
     setBusy(false);
   }
 }
@@ -2499,9 +2551,11 @@ function setBusy(busy, label = '') {
 }
 
 export function cancelExport() {
-  if (!exportRun) return false;
+  if (!exportRun || S.cancelling) return false;
+  S.cancelling = true;
   exportRun.abort();
   exportLabel.textContent = 'Cancelling…';
+  updateUI();
   return true;
 }
 
@@ -2524,6 +2578,56 @@ export function togglePlay() {
   }
   return S.playing ? pause() : play().catch(fail);
 }
+
+// ─── Resizing the tracks ─────────────────────────────────────────────────────
+// The tracks are a fixed-height column and the picture takes what is left, so
+// dragging the grip trades one for the other. Kept in localStorage rather than
+// the project: it is how you like to work, not part of the edit.
+
+const TRACKS_KEY = 'qckcut.tracksHeight';
+const MIN_TRACKS = 150;
+
+function setTracksHeight(px) {
+  // Never let it swallow the picture, and never collapse below the lanes.
+  const room = window.innerHeight - 220;
+  const height = clamp(px, MIN_TRACKS, Math.max(MIN_TRACKS, room));
+  tracksEl.style.height = `${height}px`;
+  localStorage.setItem(TRACKS_KEY, String(Math.round(height)));
+  drawStrip();
+  renderTrack();
+  renderJoints();
+  updateSeqPlayhead();
+  updateRange();
+  updateTransport();
+}
+
+/** Enough for the bars, the filmstrip and one sequence lane. */
+const naturalTracksHeight = () => Math.min(340, Math.max(MIN_TRACKS, window.innerHeight * 0.42));
+
+splitter.addEventListener('pointerdown', (event) => {
+  event.preventDefault();
+  capture(splitter, event.pointerId);
+  document.body.classList.add('resizing');
+});
+
+splitter.addEventListener('pointermove', (event) => {
+  if (!splitter.hasPointerCapture(event.pointerId)) return;
+  setTracksHeight(window.innerHeight - event.clientY);
+});
+
+for (const type of ['pointerup', 'pointercancel']) {
+  splitter.addEventListener(type, () => document.body.classList.remove('resizing'));
+}
+
+splitter.addEventListener('keydown', (event) => {
+  const step = event.shiftKey ? 48 : 12;
+  if (event.key === 'ArrowUp') setTracksHeight(tracksEl.offsetHeight + step);
+  else if (event.key === 'ArrowDown') setTracksHeight(tracksEl.offsetHeight - step);
+  else return;
+  event.preventDefault();
+});
+
+setTracksHeight(Number(localStorage.getItem(TRACKS_KEY)) || naturalTracksHeight());
 
 // ─── Help ────────────────────────────────────────────────────────────────────
 
@@ -2593,6 +2697,8 @@ drop.addEventListener('click', pickFiles);
 
 let resizeTimer = 0;
 window.addEventListener('resize', () => {
+  // Keep the tracks inside the window when it shrinks.
+  setTracksHeight(tracksEl.offsetHeight);
   drawStrip();
   renderMusic();
   updateRange();
@@ -2852,6 +2958,7 @@ export function snapshot() {
     playingSeq: S.playingSeq,
     muted: S.muted,
     rate: S.rate,
+    cancelling: S.cancelling,
     view: S.view,
     project: S.project ? { ...S.project } : null,
     settings: { ...S.settings },
@@ -2891,11 +2998,12 @@ export async function boot() {
 Object.assign(window, {
   S, media, store, snapshot, restore,
   seek, play, pause, addSource, setActive, removeSource,
-  addClip, markClip, beginMark, cancelMark, selectClip, removeClip, syncItemsFromClip,
+  addClip, markClip, beginMark, cancelMark, markIn, markOut, selectClip, removeClip, syncItemsFromClip,
   renameSource, renameClip, renameItem, exportRange, buildStrip, queueStrip, drawStrip, stripsIdle,
   sequence, render, addToSequence, removeFromSequence, moveInSequence, selectItem,
   appendRange, playSequence, stopSequence, exportSequence, sequenceShape,
   setView, seekSequence, togglePlay, seqTimeForX, exportShowing, warn, clearWarning,
+  setTracksHeight,
   boot, openProject, newProject, renameProject, dropProject, setSettings, outputShape,
   cancelExport, transitions, transitionAt, setTransition, selectBoundary,
   addAudioTrack, removeAudioTrack, moveBetweenLanes,

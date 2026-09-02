@@ -129,7 +129,7 @@ test('adjusting the range while a clip is selected edits that clip', async ({ ap
   await app.page.evaluate(() => { window.S.in = 1; window.S.out = 2; return window.addClip(); });
 
   await app.page.evaluate(() => { window.S.playhead = 3; });
-  await app.page.locator('#markOut').click();
+  await app.page.evaluate(() => window.markOut());
 
   await expect.poll(async () => (await app.state()).clips[0].out).toBeCloseTo(3, 1);
   // Still one clip: adjusting edits in place rather than creating another.
@@ -215,7 +215,7 @@ test('marking in and out on a selected clip carries to the sequence', async ({ a
   await app.page.evaluate((id) => window.addToSequence('clip', id, 0), clip.id);
 
   await app.page.evaluate(() => { window.S.playhead = 4; });
-  await app.page.locator('#markOut').click();
+  await app.page.evaluate(() => window.markOut());
 
   await expect.poll(async () => (await app.state()).timeline[0].out).toBeCloseTo(4, 1);
 });
@@ -265,4 +265,64 @@ test('the link survives a reload', async ({ app }) => {
 
   await app.page.evaluate(() => window.setClipRange(window.S.clips[0].id, 1, 3.5));
   await expect.poll(async () => (await app.state()).timeline[0].out).toBeCloseTo(3.5, 2);
+});
+
+// The mark in / mark out buttons are gone; this one button carries the state.
+test('the clip button shows whether a clip is half-made', async ({ app }) => {
+  const button = app.page.locator('#clipBtn');
+  await expect(button).toBeDisabled();
+
+  await app.add('land');
+  await expect(button).toBeEnabled();
+  await expect(button).toHaveAttribute('data-state', 'idle');
+  await expect(button).toHaveAttribute('title', /Clip from here/);
+
+  await app.page.evaluate(() => window.seek(1));
+  await button.click();
+  await expect(button).toHaveAttribute('data-state', 'marking');
+  await expect(button).toHaveAttribute('title', /Clipping from 0:01\.00/);
+
+  await app.page.evaluate(() => window.seek(3));
+  await button.click();
+  await expect(button).toHaveAttribute('data-state', 'idle');
+  await expect(app.rows('clipList')).toHaveCount(1);
+});
+
+test('Esc while marking puts the button back', async ({ app }) => {
+  await app.add('land');
+  await app.page.evaluate(() => window.seek(1));
+  await app.page.locator('#clipBtn').click();
+  await expect(app.page.locator('#clipBtn')).toHaveAttribute('data-state', 'marking');
+
+  await app.page.keyboard.press('Escape');
+  await expect(app.page.locator('#clipBtn')).toHaveAttribute('data-state', 'idle');
+});
+
+test('the mark in and out buttons are gone', async ({ app }) => {
+  await app.add('land');
+  await expect(app.page.locator('#markIn')).toHaveCount(0);
+  await expect(app.page.locator('#markOut')).toHaveCount(0);
+  // The keys still work.
+  await app.page.evaluate(() => window.seek(2));
+  await app.page.keyboard.press('i');
+  expect((await app.state()).in).toBeCloseTo(2, 2);
+});
+
+// Regression: a generic button rule in the lane header padded this one too,
+// and with border-box sizing that left no room for the icon.
+test('the clip icon sits in the middle of its button', async ({ app }) => {
+  await app.add('land');
+  const gaps = await app.page.evaluate(() => {
+    const b = document.getElementById('clipBtn').getBoundingClientRect();
+    const s = document.querySelector('#clipBtn svg').getBoundingClientRect();
+    return {
+      left: s.left - b.left,
+      right: b.right - s.right,
+      top: s.top - b.top,
+      bottom: b.bottom - s.bottom,
+    };
+  });
+  expect(Math.abs(gaps.left - gaps.right), 'the icon is off centre').toBeLessThan(1);
+  expect(Math.abs(gaps.top - gaps.bottom)).toBeLessThan(1);
+  expect(gaps.left).toBeGreaterThan(0);
 });
