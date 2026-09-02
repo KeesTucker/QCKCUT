@@ -1225,9 +1225,7 @@ function renderTrack() {
     el.className = `track-item${kinds.join('')}`;
     el.dataset.id = row.item.id;
     el.dataset.index = String(row.index);
-    // Width tracks duration so the track reads as a timeline, with a floor so
-    // a very short item stays clickable.
-    el.style.flex = `${Math.max(row.duration, 0.01)} 1 0`;
+    placeItem(el, row, total);
     el.draggable = true;
     if (source?.posterUrl) el.style.backgroundImage = `url(${source.posterUrl})`;
 
@@ -1266,12 +1264,26 @@ function renderTrack() {
 
 /** Widths and durations only, so a trim can move them without a rebuild. */
 function syncTrackRows() {
-  for (const row of sequenceRows()) {
+  const rows = sequenceRows();
+  const total = rows.length ? rows[rows.length - 1].end : 0;
+  for (const row of rows) {
     const parts = trackRows.get(row.item.id);
     if (!parts) continue;
-    parts.el.style.flex = `${Math.max(row.duration, 0.01)} 1 0`;
+    placeItem(parts.el, row, total);
     parts.time.textContent = timecode(row.duration);
   }
+}
+
+/**
+ * Position an item by its time, matching how the ruler, playhead and joints map
+ * time to pixels. Laying items out with flex instead let a gap and a minimum
+ * width creep in, neither of which represents any time, and the error piled up
+ * at the end of the track.
+ */
+function placeItem(el, row, total) {
+  if (!total) return;
+  el.style.left = `${(row.start / total) * 100}%`;
+  el.style.width = `${(row.duration / total) * 100}%`;
 }
 
 /** Build a timeline item from a clip, or from a whole source. */

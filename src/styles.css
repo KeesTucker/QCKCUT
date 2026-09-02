@@ -454,13 +454,22 @@ kbd {
 
 .track-wrap { position: relative; }
 
+/* Items are positioned by time, not laid out by flex: the ruler, playhead and
+   joints all map time linearly across this box, and item edges have to agree
+   with them. A gap costs pixels that represent no time, and a minimum width
+   breaks proportionality for short items; both errors piled up in the free
+   space at the end of the track. */
 .track {
-  display: flex;
-  align-items: stretch;
-  gap: 2px;
+  position: relative;
   height: 68px;
-  margin: 0;
-  padding: 0 14px 20px;
+  /* Inset by a margin, not padding: an absolutely positioned child resolves its
+     percentages against the padding box, so padding here would shift every item
+     off the ruler, which is inset by the same margin. */
+  margin: 0 14px;
+  /* Explicitly zeroed: a bare <ol> carries a 40px padding-inline-start from the
+     UA sheet, which the absolutely positioned items ignore but everything else
+     does not. */
+  padding: 0 0 20px;
   list-style: none;
 }
 
@@ -479,14 +488,15 @@ kbd {
    adjacent-sibling match silently stopped working. */
 .sequence.has-items .empty { display: none; }
 
-/* Width is proportional to duration, so the track reads as a timeline even
-   though position is stored as order. */
+/* Placed by time, so the track reads as a timeline even though position is
+   stored as order. See the note on .track above. */
 .track-item {
-  position: relative;
+  position: absolute;
+  top: 0;
+  bottom: 20px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  min-width: 34px;
   padding: 5px 7px;
   overflow: hidden;
   border: 1px solid var(--line);
@@ -982,3 +992,50 @@ body.busy #exportBtn:hover { background: var(--s3); opacity: 1; }
 .joint:hover::after { background: var(--accent); height: 18px; }
 .joint.set::after { background: var(--grad); border-color: transparent; }
 .joint.current::after { background: var(--accent); height: 18px; }
+
+/* Lanes. Each is independently packed from the start, so they stay parallel
+   without ever needing a stored start time. */
+.lane { position: relative; }
+
+.track.audio {
+  height: 40px;
+  padding-bottom: 6px;
+  margin-top: 4px;
+}
+.track.audio .track-item { bottom: 6px; }
+.track.audio .track-item {
+  background: linear-gradient(180deg, #232447, #16172c);
+  border-color: #3a3b63;
+}
+.track.audio .track-item::before { background: none; }
+.track.audio .track-item-name { color: #b6bcfb; }
+
+.audio-lane { position: relative; }
+
+.audio-lane .lane-drop {
+  position: absolute;
+  top: 6px;
+  right: 16px;
+  z-index: 2;
+  padding: 0 5px;
+  border: none;
+  border-radius: 4px;
+  background: rgba(13, 13, 13, .8);
+  color: var(--dim);
+  font: inherit;
+  cursor: pointer;
+  opacity: 0;
+}
+.audio-lane:hover .lane-drop { opacity: 1; }
+.audio-lane .lane-drop:hover { color: var(--accent); }
+
+.audio-lane .empty-lane {
+  position: absolute;
+  inset: 0 16px 6px;
+  display: grid;
+  align-items: center;
+  color: var(--dim);
+  font-size: 11px;
+  pointer-events: none;
+}
+.track.audio:not(:empty) + .empty-lane { display: none; }

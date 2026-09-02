@@ -50,8 +50,11 @@ test('video stays paced to the audio clock, not decoded flat out', async ({ app 
     await window.play();
     return (performance.now() - started) / 1000;
   });
+  // The lower bound is the point: paced, not decoded as fast as possible. The
+  // upper bound only guards against a hang, so it is loose enough to survive a
+  // loaded machine running the whole suite in parallel.
   expect(result).toBeGreaterThan(1.1);
-  expect(result).toBeLessThan(3.5);
+  expect(result).toBeLessThan(10);
 });
 
 test('muting stops audio being scheduled', async ({ app }) => {

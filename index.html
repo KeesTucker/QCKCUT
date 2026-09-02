@@ -140,6 +140,7 @@
     <h2>Sequence</h2>
     <span id="seqDuration" class="time">0:00.00</span>
     <span class="spacer"></span>
+    <button id="addAudioTrack" class="ghost text" title="Add an audio track">+ Audio</button>
     <label class="music-gain" id="musicGainWrap" hidden>
       <span id="musicName" class="music-name">music</span>
       <input id="musicGain" type="range" min="0" max="1" step="0.01" value="0.35" aria-label="Music level">
@@ -148,7 +149,10 @@
   </div>
   <div class="track-wrap">
     <div id="seqRuler" class="ruler" title="Drag to scrub the sequence"></div>
-    <ol id="track" class="track"></ol>
+    <div id="videoLane" class="lane">
+      <ol id="track" class="track"></ol>
+    </div>
+    <div id="audioLanes"></div>
     <div id="seqPlayheadEl" class="seq-playhead"></div>
     <p id="trackEmpty" class="empty">Drag clips or sources here to build a sequence</p>
   </div>
@@ -219,6 +223,11 @@
 
       <section>
         <h4>Sequence</h4>
+        <p><kbd>+ Audio</kbd> adds an audio track under the picture. Audio tracks
+        work exactly like the video one: items sit end to end from the start, in
+        the order you put them, and they play underneath. Only their sound is
+        used, so dropping a video on one takes its audio and leaves its picture
+        alone.</p>
         <p>Drag clips or whole sources onto the Sequence track to assemble them,
         and drag them within the track to reorder. The strip above the items is a
         scrubber: drag it to move through the whole sequence, across the cuts. Position comes from order, so
