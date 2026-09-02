@@ -2,6 +2,7 @@ import * as audio from './audio.js';
 import * as media from './media.js';
 import * as render from './render.js';
 import * as sequence from './sequence.js';
+import * as transitions from './transitions.js';
 import * as store from './store.js';
 
 // ─── State ───────────────────────────────────────────────────────────────────
@@ -32,6 +33,8 @@ const S = {
   view: 'source',   // which of the two things the viewer is showing
   project: null,    // { id, name }
   settings: { width: null, height: null, fps: null },   // null means match the source
+  transitions: { intro: null, outro: null },            // the sequence's own ends
+  boundary: null,   // which joint the Effects panel is showing
 };
 
 const MIN_RANGE = 0.05;   // shortest selection we allow, seconds
@@ -91,6 +94,16 @@ const menuEl = $('menu');
 const exportBar = $('exportBar');
 const exportFill = $('exportFill');
 const exportLabel = $('exportLabel');
+const tabSources = $('tabSources');
+const tabEffects = $('tabEffects');
+const sourcesPane = $('sourcesPane');
+const effectsPane = $('effectsPane');
+const effectList = $('effectList');
+const effectWhere = $('effectWhere');
+const effectAt = $('effectAt');
+const effectDuration = $('effectDuration');
+const effectDurationWrap = $('effectDurationWrap');
+const effectDurationValue = $('effectDurationValue');
 const musicGainWrap = $('musicGainWrap');
 const musicGain = $('musicGain');
 const musicName = $('musicName');
@@ -157,10 +170,16 @@ const INK = {
   accent2: '129, 140, 248',   // --accent2 #818cf8
 };
 
-function paint(sample) {
+function paint(sample, dim = 0) {
   pctx.fillStyle = '#000';
   pctx.fillRect(0, 0, preview.width, preview.height);
   sample.drawWithFit(pctx, { fit: 'contain' });
+  // The same darkening the render applies, from the same function, so the
+  // preview cannot disagree with the file about what a transition looks like.
+  if (dim > 0) {
+    pctx.fillStyle = `rgba(0, 0, 0, ${dim})`;
+    pctx.fillRect(0, 0, preview.width, preview.height);
+  }
 }
 
 /** Wipe the picture. Nothing to show is still something to render. */
@@ -199,7 +218,7 @@ function paintSilence(label) {
 // lags seconds behind the pointer.
 
 let pendingSeek = null;
-let seeking = false;
+let seekLoop = null;
 
 export async function seek(time) {
   const source = active();
@@ -212,23 +231,23 @@ export async function seek(time) {
     return;
   }
   pendingSeek = S.playhead;
-  if (seeking) return;
+  // Callers get the running drain rather than an immediate return, so awaiting
+  // a seek means the newest frame is on screen, not merely requested.
+  seekLoop ??= drainSeeks().finally(() => { seekLoop = null; });
+  return seekLoop;
+}
 
-  seeking = true;
-  try {
-    while (pendingSeek !== null) {
-      const want = pendingSeek;
-      pendingSeek = null;
-      const sample = await held.sink.getSample(want);
-      if (!sample) continue;
-      try {
-        paint(sample);
-      } finally {
-        sample.close();
-      }
+async function drainSeeks() {
+  while (pendingSeek !== null) {
+    const want = pendingSeek;
+    pendingSeek = null;
+    const sample = await held?.sink?.getSample(want);
+    if (!sample) continue;
+    try {
+      paint(sample);
+    } finally {
+      sample.close();
     }
-  } finally {
-    seeking = false;
   }
 }
 
@@ -609,6 +628,33 @@ function renderClips() {
   }));
 }
 
+/** The clickable joints on the track: sequence start, each cut, sequence end. */
+function renderJoints() {
+  for (const old of track.parentElement.querySelectorAll('.joint')) old.remove();
+  const rows = sequenceRows();
+  const total = rows.length ? rows[rows.length - 1].end : 0;
+  if (!total) return;
+
+  const rect = seqRuler.getBoundingClientRect();
+  if (!rect.width) return;
+
+  for (const boundary of transitions.boundaries(rows)) {
+    const set = transitionAt(boundary);
+    const el = document.createElement('div');
+    el.className = `joint${set ? ' set' : ''}${S.boundary?.key === boundary.key ? ' current' : ''}`;
+    el.dataset.key = boundary.key;
+    el.title = `${boundary.label}${set ? `: ${transitions.KINDS[set.type].label}` : ''}`;
+    el.style.left = `${seqRuler.offsetLeft + (boundary.at / total) * rect.width}px`;
+    // The ruler behind it scrubs; a joint is a button, not a scrub surface.
+    el.addEventListener('pointerdown', (event) => event.stopPropagation());
+    el.addEventListener('click', (event) => {
+      event.stopPropagation();
+      selectBoundary(boundary.key);
+    });
+    track.parentElement.append(el);
+  }
+}
+
 function syncClipRows() {
   for (const clip of S.clips) {
     const parts = clipRows.get(clip.id);
@@ -870,6 +916,8 @@ function updateUI() {
   renderClips();
   renderTrack();
   renderMusic();
+  renderJoints();
+  renderEffects();
   updateRange();
   updateMark();
   updateView();
@@ -910,20 +958,25 @@ export async function setActive(id) {
     return;
   }
   held = await media.acquire(source);
-  if (media.isVideo(source)) {
-    preview.width = source.width;
-    preview.height = source.height;
-  } else {
-    // No pictures. A modest canvas is enough for the placeholder.
-    preview.width = 640;
-    preview.height = 360;
+  // Only when the viewer is actually showing this source: while the sequence is
+  // showing, the canvas belongs to the sequence's shape.
+  if (S.view === 'source') {
+    if (media.isVideo(source)) {
+      preview.width = source.width;
+      preview.height = source.height;
+    } else {
+      // No pictures. A modest canvas is enough for the placeholder.
+      preview.width = 640;
+      preview.height = 360;
+    }
   }
   S.playhead = 0;
   S.in = 0;
   S.out = source.duration;
   S.activeClipId = null;
   updateUI();
-  await seek(0);
+  // Whatever the viewer is following, not necessarily this source.
+  await refreshPreview();
   if (!source.thumbCount) queueStrip(source);
 }
 
@@ -1083,6 +1136,29 @@ export async function removeClip(id) {
 
 // Adjusting in/out while a clip is selected edits that clip in place, which is
 // what "resized and adjusted after the fact" means.
+/**
+ * Apply the range to the clip and everything linked to it, without writing to
+ * disk. Called on every pointermove of a trim handle so the sequence resizes
+ * under the pointer; the write happens once, on release.
+ */
+function liveSyncActiveClip() {
+  const clip = S.clips.find((c) => c.id === S.activeClipId);
+  if (!clip) return null;
+  clip.in = S.in;
+  clip.out = S.out;
+  for (const item of S.timeline) {
+    if (item.clipId === clip.id) {
+      item.in = clip.in;
+      item.out = clip.out;
+    }
+  }
+  syncClipRows();
+  renderTrack();
+  renderJoints();
+  updateSeqPlayhead();
+  return clip;
+}
+
 async function syncActiveClip() {
   const clip = S.clips.find((c) => c.id === S.activeClipId);
   if (!clip) return;
@@ -1121,17 +1197,26 @@ export function sequenceShape(rows) {
 // destroys the element before its own click can land.
 let trackShape = null;
 
+// Durations are deliberately not part of the shape: they change continuously
+// while a trim handle is dragged, and rebuilding the track under the pointer
+// would be janky and pointless. syncTrackRows() moves them in place instead.
+let trackRows = new Map();
+
 const trackShapeOf = () => S.timeline
-  .map((i) => `${i.id}:${(i.out - i.in).toFixed(3)}:${i.label}:${sourceById(i.sourceId)?.posterUrl ? 1 : 0}`)
+  .map((i) => `${i.id}:${i.label}:${sourceById(i.sourceId)?.posterUrl ? 1 : 0}`)
   .join(',') + `|${S.activeItemId}`;
 
 function renderTrack() {
   const rows = sequenceRows();
   const total = rows.length ? rows[rows.length - 1].end : 0;
   seqDurationEl.textContent = timecode(total);
+  // Set here, not in updateSeqPlayhead: without it the ruler is hidden, a
+  // hidden element has no width, and the joints measure against the ruler.
+  sequenceEl.classList.toggle('has-items', rows.length > 0);
 
-  if (trackShapeOf() === trackShape) return;
+  if (trackShapeOf() === trackShape) return syncTrackRows();
   trackShape = trackShapeOf();
+  trackRows = new Map();
 
   track.replaceChildren(...rows.map((row) => {
     const source = sourceById(row.item.sourceId);
@@ -1164,6 +1249,7 @@ function renderTrack() {
     });
 
     el.append(name, time, drop);
+    trackRows.set(row.item.id, { el, name, time });
     el.addEventListener('click', () => selectItem(row.item.id).catch(fail));
     el.addEventListener('dragstart', (event) => {
       event.dataTransfer.setData(DRAG_TYPE, JSON.stringify({ kind: 'item', index: row.index }));
@@ -1176,6 +1262,16 @@ function renderTrack() {
     });
     return el;
   }));
+}
+
+/** Widths and durations only, so a trim can move them without a rebuild. */
+function syncTrackRows() {
+  for (const row of sequenceRows()) {
+    const parts = trackRows.get(row.item.id);
+    if (!parts) continue;
+    parts.el.style.flex = `${Math.max(row.duration, 0.01)} 1 0`;
+    parts.time.textContent = timecode(row.duration);
+  }
 }
 
 /** Build a timeline item from a clip, or from a whole source. */
@@ -1238,6 +1334,17 @@ export async function selectItem(id) {
   S.activeItemId = id;
   S.seqPlayhead = row.start;
   S.view = 'sequence';   // clicking an item means you want to watch the sequence
+
+  // Bring the panels along: the source it came from becomes the active one, and
+  // the clip it was made from becomes the selected clip, with its range marked
+  // on the filmstrip. The viewer stays on the sequence.
+  await setActive(row.item.sourceId);
+  const clip = S.clips.find((c) => c.id === row.item.clipId);
+  S.activeClipId = clip?.id ?? null;
+  S.in = row.item.in;
+  S.out = row.item.out;
+  S.playhead = row.item.in;
+
   updateUI();
   await seekSequence(row.start);
 }
@@ -1438,7 +1545,7 @@ export async function playSequence() {
             if (wait < -50 && painted) continue;
             if (wait > 0) await sleep(wait);
             if (!S.playingSeq) break;
-            paint(sample);
+            paint(sample, transitions.dimAt(at, transitionPlan()));
             painted = true;
             S.seqPlayhead = at;
             updateTransport();
@@ -1483,7 +1590,8 @@ export async function exportSequence() {
     const rows = sequenceRows();
     const started = performance.now();
     const blob = await render.renderSequence(rows, (item) => sourceById(item.sourceId),
-      showProgress, S.music, outputShape(rows), S.settings.fps, run.signal);
+      showProgress, S.music, outputShape(rows), S.settings.fps, run.signal,
+      transitionPlan());
     const took = (performance.now() - started) / 1000;
     render.download(blob, 'sequence.mp4');
     const total = rows[rows.length - 1].end;
@@ -1500,6 +1608,117 @@ export async function exportSequence() {
   }
 }
 
+
+// ─── Transitions ─────────────────────────────────────────────────────────────
+// A boundary is a joint in the sequence: before the first item, between each
+// pair, after the last. Clicking one shows its options in the Effects panel.
+
+const transitionPlan = () => transitions.plan(sequenceRows(), S.transitions);
+
+/** What a boundary is set to right now. */
+export function transitionAt(boundary) {
+  if (!boundary) return null;
+  if (boundary.kind === 'between') {
+    return S.timeline.find((i) => i.id === boundary.itemId)?.transition ?? null;
+  }
+  return S.transitions[boundary.kind] ?? null;
+}
+
+export async function setTransition(boundary, type, duration) {
+  if (!boundary) return null;
+  const length = duration ?? transitionAt(boundary)?.duration
+    ?? transitions.KINDS[type]?.duration ?? transitions.DEFAULT_DURATION;
+  const value = type === 'none' ? null : { type, duration: length };
+
+  if (boundary.kind === 'between') {
+    const item = S.timeline.find((i) => i.id === boundary.itemId);
+    if (!item) return null;
+    item.transition = value;
+    await store.putTimeline(S.timeline);
+  } else {
+    S.transitions = { ...S.transitions, [boundary.kind]: value };
+    await store.putTransitions(S.transitions);
+  }
+
+  updateUI();
+  await refreshPreview();
+  return value;
+}
+
+export function selectBoundary(key) {
+  const found = transitions.boundaries(sequenceRows()).find((b) => b.key === key);
+  if (!found) return null;
+  S.boundary = found;
+  showPanel('effects');
+  updateUI();
+  // Park the viewer on the joint so the change is visible as it is made.
+  setView('sequence');
+  seekSequence(found.at).catch(fail);
+  return found;
+}
+
+function renderEffects() {
+  const list = transitions.boundaries(sequenceRows());
+  const boundary = S.boundary && list.find((b) => b.key === S.boundary.key);
+  S.boundary = boundary ?? null;
+  tabEffects.disabled = !list.length;
+  if (!boundary) {
+    effectList.replaceChildren();
+    effectWhere.textContent = 'Nothing selected';
+    effectAt.textContent = '';
+    effectDurationWrap.hidden = true;
+    return;
+  }
+
+  const current = transitionAt(boundary);
+  effectWhere.textContent = boundary.label;
+  effectAt.textContent = timecode(boundary.at);
+
+  effectList.replaceChildren(...transitions.kindsFor(boundary).map((type) => {
+    const li = document.createElement('li');
+    const item = document.createElement('div');
+    const chosen = (current?.type ?? 'none') === type;
+    item.className = `item${chosen ? ' active' : ''}`;
+    const text = document.createElement('div');
+    text.className = 'item-text';
+    const name = document.createElement('div');
+    name.className = 'item-name';
+    name.textContent = transitions.KINDS[type].label;
+    text.append(name);
+    item.append(text);
+    item.addEventListener('click', () => setTransition(boundary, type).catch(fail));
+    li.append(item);
+    return li;
+  }));
+
+  effectDurationWrap.hidden = !current;
+  if (current) {
+    if (Number(effectDuration.value) !== current.duration) {
+      effectDuration.value = String(current.duration);
+    }
+    effectDurationValue.textContent = `${current.duration.toFixed(2)}s`;
+  }
+}
+
+effectDuration.addEventListener('input', () => {
+  const current = transitionAt(S.boundary);
+  if (!current) return;
+  effectDurationValue.textContent = `${Number(effectDuration.value).toFixed(2)}s`;
+  setTransition(S.boundary, current.type, Number(effectDuration.value)).catch(fail);
+});
+
+// ─── Panel tabs ──────────────────────────────────────────────────────────────
+
+function showPanel(which) {
+  const effects = which === 'effects';
+  sourcesPane.hidden = effects;
+  effectsPane.hidden = !effects;
+  tabSources.classList.toggle('active', !effects);
+  tabEffects.classList.toggle('active', effects);
+}
+
+tabSources.addEventListener('click', () => showPanel('sources'));
+tabEffects.addEventListener('click', () => showPanel('effects'));
 
 // ─── Music bed ───────────────────────────────────────────────────────────────
 // One bed per project. It plays under the sequence only, not the source
@@ -1751,6 +1970,7 @@ function bindHandle(el, which) {
     else S.out = clamp(t, S.in + MIN_RANGE, duration);
     updateRange();
     drawStrip();
+    liveSyncActiveClip();
     seek(t).catch(fail);
   });
   el.addEventListener('pointerup', () => syncActiveClip().catch(fail));
@@ -1896,7 +2116,7 @@ function updateView() {
 // order their decodes happen to complete, and the preview settles on a stale
 // frame. setView() starts one without awaiting it, so this is easy to hit.
 let pendingSeqSeek = null;
-let seekingSeq = false;
+let seqSeekLoop = null;
 
 // The ruler spans exactly the items' area, so sequence time maps linearly onto
 // it: item widths are already proportional to their durations.
@@ -1931,36 +2151,35 @@ export async function seekSequence(time) {
   if (preview.height !== shape.height) preview.height = shape.height;
 
   pendingSeqSeek = S.seqPlayhead;
-  if (seekingSeq) return;
+  seqSeekLoop ??= drainSeqSeeks().finally(() => { seqSeekLoop = null; });
+  return seqSeekLoop;
+}
 
-  seekingSeq = true;
-  try {
-    while (pendingSeqSeek !== null) {
-      const want = pendingSeqSeek;
-      pendingSeqSeek = null;
+async function drainSeqSeeks() {
+  while (pendingSeqSeek !== null) {
+    const want = pendingSeqSeek;
+    pendingSeqSeek = null;
+    const rows = sequenceRows();
 
-      const row = sequence.at(rows, want);
-      if (!row) {
-        paintSilence(rows.length ? '' : 'empty sequence');
-        continue;
-      }
-      const source = sourceById(row.item.sourceId);
-      if (!media.isVideo(source)) {
-        paintSilence(row.item.label);
-        continue;
-      }
-      await media.using(source, async ({ sink }) => {
-        const sample = await sink.getSample(sequence.sourceTime(row, want));
-        if (!sample) return;
-        try {
-          paint(sample);
-        } finally {
-          sample.close();
-        }
-      });
+    const row = sequence.at(rows, want);
+    if (!row) {
+      paintSilence(rows.length ? '' : 'empty sequence');
+      continue;
     }
-  } finally {
-    seekingSeq = false;
+    const source = sourceById(row.item.sourceId);
+    if (!media.isVideo(source)) {
+      paintSilence(row.item.label);
+      continue;
+    }
+    await media.using(source, async ({ sink }) => {
+      const sample = await sink.getSample(sequence.sourceTime(row, want));
+      if (!sample) return;
+      try {
+        paint(sample, transitions.dimAt(want, transitionPlan()));
+      } finally {
+        sample.close();
+      }
+    });
   }
 }
 
@@ -2159,7 +2378,10 @@ function forgetProject() {
     playhead: 0, in: 0, out: 0, seqPlayhead: 0, marking: null,
     view: 'source',
     settings: { width: null, height: null, fps: null },
+    transitions: { intro: null, outro: null },
+    boundary: null,
   });
+  showPanel('sources');
   // Both lists rebuild from scratch, so their caches must not survive.
   clipsShape = null;
   trackShape = null;
@@ -2181,6 +2403,7 @@ export async function openProject(id) {
   await store.use(id);
   S.project = { id: project.id, name: project.name };
   S.settings = (await store.getSettings()) ?? S.settings;
+  S.transitions = (await store.getTransitions()) ?? S.transitions;
   updateUI();
   await restore();
   updateUI();
@@ -2366,6 +2589,8 @@ export function snapshot() {
     view: S.view,
     project: S.project ? { ...S.project } : null,
     settings: { ...S.settings },
+    transitions: { ...S.transitions },
+    boundary: S.boundary ? { key: S.boundary.key, kind: S.boundary.kind, at: S.boundary.at } : null,
     marking: S.marking ? { at: S.marking.at } : null,
     kind: source?.kind ?? null,
     music: S.music
@@ -2406,7 +2631,8 @@ Object.assign(window, {
   appendRange, playSequence, stopSequence, exportSequence, sequenceShape,
   setView, seekSequence, togglePlay, seqTimeForX, exportShowing, warn, clearWarning,
   boot, openProject, newProject, renameProject, dropProject, setSettings, outputShape,
-  cancelExport,
+  cancelExport, transitions, transitionAt, setTransition, selectBoundary,
+  liveSyncActiveClip,
   refreshPreview,
   audio, setMusic, setMusicFromSource, removeMusic, setMusicGain, setMuted, setRate,
   timecode, parseTimecode, clamp, clipLabel, exportName, setClipRange,

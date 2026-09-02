@@ -56,6 +56,9 @@ test('the playhead marker follows the scrub', async ({ app }) => {
   await build(app, { clip: 'land', in: 0, out: 4 });
   const box = await ruler(app).boundingBox();
 
+  // The marker only exists while the sequence is what the viewer follows, which
+  // is what a real scrub does before it moves anything.
+  await app.page.evaluate(() => window.setView('sequence'));
   const at = (fraction) => app.page.evaluate(async (f) => {
     const r = document.getElementById('seqRuler').getBoundingClientRect();
     await window.seekSequence(window.S.timeline.reduce((t, i) => t + (i.out - i.in), 0) * f);

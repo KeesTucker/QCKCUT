@@ -166,3 +166,65 @@ test('overlapping sequence seeks settle on the newest frame', async ({ app }) =>
       .toBeLessThan(24);
   }
 });
+
+// Clicking an item should leave the panels agreeing with the timeline: the
+// source it came from active, and the clip it was made from selected.
+test('a sequence item selects its source and its clip', async ({ app }) => {
+  await app.add('land', 'hd');
+  const hd = (await app.state()).sources.find((s) => s.name === 'hd.mp4');
+  await app.page.evaluate((id) => window.setActive(id), hd.id);
+
+  const clip = await app.page.evaluate(() => {
+    window.S.in = 2;
+    window.S.out = 4;
+    return window.addClip();
+  });
+  await app.page.evaluate((id) => window.addToSequence('clip', id, 0), clip.id);
+
+  // Move away to a different source entirely.
+  const land = (await app.state()).sources.find((s) => s.name === 'land.mp4');
+  await app.page.evaluate((id) => window.setActive(id), land.id);
+  expect((await app.state()).activeId).toBe(land.id);
+
+  await app.page.locator('#track .track-item').first().click();
+
+  // selectItem awaits setActive, which assigns activeId before the clip and the
+  // range, so poll the whole condition rather than the first field written.
+  await expect.poll(async () => {
+    const state = await app.state();
+    return state.activeId === hd.id
+      && state.activeClipId === clip.id
+      && Math.abs(state.in - 2) < 0.01
+      && Math.abs(state.out - 4) < 0.01;
+  }).toBe(true);
+  const s = await app.state();
+  // And the viewer is still following the sequence, not the source.
+  expect(s.view).toBe('sequence');
+
+  await expect(app.page.locator('#sourceList .item.active .item-name')).toHaveText('hd.mp4');
+  await expect(app.page.locator('#clipList .item.active')).toHaveCount(1);
+});
+
+test('an item dragged from a source selects the source but no clip', async ({ app }) => {
+  await app.add('land');
+  const id = (await app.state()).sources[0].id;
+  await app.page.evaluate((x) => window.addToSequence('source', x, 0), id);
+
+  await app.page.locator('#track .track-item').first().click();
+
+  const s = await app.state();
+  expect(s.activeId).toBe(id);
+  expect(s.activeClipId).toBeNull();
+});
+
+test('only the area being watched shows a playhead', async ({ app }) => {
+  await app.add('land');
+  await app.page.evaluate(() => { window.S.in = 0; window.S.out = 2; return window.appendRange(); });
+
+  await expect(app.page.locator('#playheadEl')).toBeVisible();
+  await expect(app.page.locator('#seqPlayheadEl')).toBeHidden();
+
+  await app.page.evaluate(() => window.setView('sequence'));
+  await expect(app.page.locator('#seqPlayheadEl')).toBeVisible();
+  await expect(app.page.locator('#playheadEl')).toBeHidden();
+});

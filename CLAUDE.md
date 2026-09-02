@@ -19,7 +19,7 @@ Package manager is **pnpm** (pinned in `packageManager`).
 ```bash
 pnpm install
 pnpm dev              # Vite on http://localhost:5173
-pnpm test             # the gate: 207 Playwright tests in real Chrome
+pnpm test             # the gate: 222 Playwright tests in real Chrome
 pnpm build            # production bundle into dist/
 pnpm preview          # serve that bundle
 pnpm test:report      # open the HTML report
@@ -41,7 +41,8 @@ there is no browser download after `pnpm install`.
 ```
 index.html              Vite entry. Stays at the root; that is the convention.
 vite.config.js
-src/                    app.js, audio.js, media.js, render.js, sequence.js, store.js, styles.css
+src/                    app.js, audio.js, media.js, render.js, sequence.js,
+                        transitions.js, store.js, styles.css
 test/
   fixture.mjs           encodes a synthetic clip in the browser
   mediabunny.mjs        re-export, see below
@@ -75,12 +76,13 @@ Two things follow from Vite that are easy to trip over:
 
 ## Architecture
 
-### Six modules
+### Seven modules
 
 - `store.js` — IndexedDB. Sources hold blobs, which localStorage cannot take.
 - `audio.js` — the AudioContext, playback scheduling, scrub grains, waveforms.
 - `media.js` — opening media, the decoder pool, filmstrip tile decoding.
 - `sequence.js` — the timeline model. Pure and DOM-free, so it unit-tests cleanly.
+- `transitions.js` — what a transition looks like, also pure.
 - `render.js` — turning a range or a sequence into an MP4.
 - `app.js` — state, rendering, and all DOM wiring.
 
@@ -394,6 +396,11 @@ the failure: twice now the "flaky" test was reporting a real ordering bug.
 - **The canvas holds its last frame forever.** Anything that changes what should
   be on screen has to repaint or wipe: `refreshPreview()` does that, and both
   switching project and deleting the last source used to leave a stale frame up.
+- **Awaiting a seek means painted.** `seek()` and `seekSequence()` return the
+  running drain rather than an immediate `undefined` when one is already in
+  flight, or `await seek(x)` means "queued" and callers read a stale canvas.
+- Only the area the viewer follows shows a playhead. Two white bars moving
+  independently are two answers to "where am I".
 - `updatePlayButton()` is the only thing that sets the play glyph. It is a
   toggle for whichever view is showing, so setting it from inside one playback
   path left sequence playback reading "play" the whole time it ran.
@@ -483,6 +490,23 @@ follows its trims, so the timeline shows the clip you have rather than the one
 you had when you dragged it on. Items dragged straight from a source have no
 `clipId` and are never touched, and deleting a clip costs its items nothing
 because they hold their own range.
+
+## Transitions
+
+Every transition in `KINDS` works by **darkening the picture that is already
+being drawn**, so it needs one decoder and no overlap. That is what lets
+`transitions.dimAt()` drive the preview and the render from the same function:
+they paint the same black over the same frame, so they cannot disagree.
+
+A cross dissolve is deliberately absent. It needs two items decoded at the same
+instant and it overlaps them, which shortens the sequence, so it is a change to
+`layout()`, to the render loop and to playback rather than another entry in
+`KINDS`.
+
+Joints live in their own lane along the bottom of the track. They were first
+drawn across its full height, which put them on top of the ruler (the scrub
+surface) and on top of each item's remove button, since a cut lands exactly on
+both.
 
 ## Marking a clip
 

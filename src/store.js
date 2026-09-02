@@ -156,9 +156,18 @@ export async function clearAll() {
 // want. Stored per project, since it describes that project's deliverable.
 
 const SETTINGS_KEY = 'output';
+const TRANSITIONS_KEY = 'transitions';
 
 export const putSettings = (settings) =>
   run('settings', 'readwrite', (s) => s.put({ ...settings, id: SETTINGS_KEY }));
+
+export const putTransitions = (value) =>
+  run('settings', 'readwrite', (s) => s.put({ ...value, id: TRANSITIONS_KEY }));
+
+export async function getTransitions() {
+  const row = await run('settings', 'readonly', (s) => s.get(TRANSITIONS_KEY));
+  return row ? { intro: row.intro ?? null, outro: row.outro ?? null } : null;
+}
 
 export async function getSettings() {
   const row = await run('settings', 'readonly', (s) => s.get(SETTINGS_KEY));

@@ -14,6 +14,7 @@ import {
   VideoSampleSink,
 } from 'mediabunny';
 import * as media from './media.js';
+import * as transitions from './transitions.js';
 
 /** Thrown when a render is stopped on purpose, so callers can tell it apart. */
 export class Cancelled extends Error {
@@ -74,7 +75,7 @@ export async function renderClip(source, start, end, onProgress, settings = {}, 
  * with nothing to show for it, so the phase is reported rather than left to
  * look like a hang.
  */
-export async function renderSequence(rows, sourceOf, onProgress, music = null, shape = null, fps = null, signal) {
+export async function renderSequence(rows, sourceOf, onProgress, music = null, shape = null, fps = null, signal, plan = null) {
   if (!rows.length) throw new Error('the sequence is empty');
   // The caller picks the shape, because the first item may be audio and have
   // no dimensions of its own.
@@ -106,7 +107,7 @@ export async function renderSequence(rows, sourceOf, onProgress, music = null, s
   onProgress?.(0, 'video');
 
   try {
-    await renderFrames({ rows, sourceOf, ctx, canvas, video, total, fps, onProgress, signal });
+    await renderFrames({ rows, sourceOf, ctx, canvas, video, total, fps, onProgress, signal, plan });
   } catch (error) {
     // A started Output holds an encoder, so it has to be cancelled either way.
     await output.cancel().catch(() => {});
@@ -119,7 +120,15 @@ export async function renderSequence(rows, sourceOf, onProgress, music = null, s
   return new Blob([output.target.buffer], { type: 'video/mp4' });
 }
 
-async function renderFrames({ rows, sourceOf, ctx, canvas, video, total, fps, onProgress, signal }) {
+async function renderFrames({ rows, sourceOf, ctx, canvas, video, total, fps, onProgress, signal, plan }) {
+  // The same darkening the preview applies, from the same function.
+  const darken = (at) => {
+    const dim = plan ? transitions.dimAt(at, plan) : 0;
+    if (dim <= 0) return;
+    ctx.fillStyle = `rgba(0, 0, 0, ${dim})`;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  };
+
   for (const row of rows) {
     stopIf(signal);
     const source = sourceOf(row.item);
@@ -152,8 +161,9 @@ async function renderFrames({ rows, sourceOf, ctx, canvas, video, total, fps, on
             ctx.fillStyle = '#000';
             ctx.fillRect(0, 0, canvas.width, canvas.height);
             sample.drawWithFit(ctx, { fit: 'contain' });
+            darken(at);
             await video.add(at, 1 / fps);
-            onProgress?.(Math.min(1, at / total));
+            onProgress?.(Math.min(1, at / total), 'video');
           } finally {
             sample.close();
           }
@@ -201,14 +211,14 @@ async function renderFrames({ rows, sourceOf, ctx, canvas, video, total, fps, on
           // Letterbox rather than stretch: items are not all the same shape.
           ctx.fillStyle = '#000';
           ctx.fillRect(0, 0, canvas.width, canvas.height);
-          sample.drawWithFit(ctx, { fit: 'contain' });
-
           const at = atOf(sample.timestamp);
+          sample.drawWithFit(ctx, { fit: 'contain' });
+          darken(at);
           const nextAt = !lookahead.done && !past(lookahead.value)
             ? atOf(lookahead.value.timestamp)
             : row.end;
           await video.add(at, Math.max(0, nextAt - at) || undefined);
-          onProgress?.(Math.min(1, at / total));
+          onProgress?.(Math.min(1, at / total), 'video');
         } finally {
           sample.close();
         }
