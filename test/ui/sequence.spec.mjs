@@ -192,21 +192,54 @@ test('the sequence survives a reload in order', async ({ app }) => {
   expect((await app.state()).sequenceDuration).toBeCloseTo(4.5, 2);
 });
 
-test('export names what it will render, and follows the view', async ({ app }) => {
+test('export follows the sequence, not the view', async ({ app }) => {
   await app.add('land');
   const button = app.page.locator('#exportBtn');
 
-  // Source view: the marked range.
+  // Nothing on the sequence: the marked range is all there is to render.
   await expect(button).toHaveText('Export clip');
   await expect(button).toBeEnabled();
 
-  // Sequence view with nothing on it: nothing to render.
   await app.page.evaluate(() => window.setView('sequence'));
-  await expect(button).toHaveText('Export sequence');
-  await expect(button).toBeDisabled();
+  await expect(button, 'the view must not change what export means').toHaveText('Export clip');
 
+  // Once the sequence has something, that is the deliverable.
+  await app.page.evaluate(() => window.setView('source'));
   await app.page.evaluate(() => { window.S.in = 0; window.S.out = 1; return window.appendRange(); });
+  await expect(button).toHaveText('Export sequence');
   await expect(button).toBeEnabled();
+
+  // Still the sequence, even while watching a source.
+  await app.page.evaluate(() => window.setView('source'));
+  await expect(button).toHaveText('Export sequence');
+});
+
+test('the export button renders the sequence even from source view', async ({ app }) => {
+  test.setTimeout(120_000);
+  await app.add('land');
+  await app.page.evaluate(() => { window.S.in = 0; window.S.out = 1.5; return window.appendRange(); });
+  // Watching a source, with a different range marked than the sequence holds.
+  await app.page.evaluate(() => { window.setView('source'); window.S.in = 3; window.S.out = 5.5; });
+
+  const duration = await app.page.evaluate(async () => {
+    let captured = null;
+    const realCreate = URL.createObjectURL;
+    URL.createObjectURL = function (b) { captured = b; return realCreate.call(URL, b); };
+    HTMLAnchorElement.prototype.click = function () {};
+    document.getElementById('exportBtn').click();
+    await new Promise((r) => setTimeout(r, 50));
+    while (window.S.exporting) await new Promise((r) => setTimeout(r, 100));
+    URL.createObjectURL = realCreate;
+
+    const mb = await import('/test/mediabunny.mjs');
+    const input = new mb.Input({ source: new mb.BlobSource(captured), formats: mb.ALL_FORMATS });
+    const out = await (await input.getPrimaryVideoTrack()).computeDuration();
+    input.dispose();
+    return out;
+  });
+
+  // 1.5s of sequence, not the 2.5s marked on the source.
+  expect(duration).toBeCloseTo(1.5, 1);
 });
 
 // The handlers above are exercised through their functions; these drive the

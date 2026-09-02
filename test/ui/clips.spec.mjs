@@ -158,3 +158,11 @@ test('a too-short range does not become a clip', async ({ app }) => {
   expect(clip).toBeNull();
   await expect(app.rows('clipList')).toHaveCount(0);
 });
+
+// The Clips panel has no add button: a clip comes from marking, which needs the
+// playhead. A button with no idea where the playhead is would be a trap.
+test('there is no add button in the Clips panel', async ({ app }) => {
+  await app.add('land');
+  await expect(app.page.locator('#addClip')).toHaveCount(0);
+  await expect(app.page.locator('#clipList')).toBeEmpty();
+});

@@ -100,3 +100,48 @@ test('the last project opened comes back on reload', async ({ app }) => {
   await app.page.waitForFunction(() => window.S?.project);
   expect((await app.state()).project.id).toBe(id);
 });
+
+// Regression: the preview canvas holds whatever it last painted, so a new
+// project opened still showing the previous one's frame.
+test('a new project starts with an empty preview', async ({ app }) => {
+  await app.add('land');
+  await app.page.evaluate(() => window.seek(2));
+
+  const before = await app.page.evaluate(() => {
+    const c = document.getElementById('preview');
+    const d = c.getContext('2d').getImageData(c.width >> 1, c.height >> 1, 1, 1).data;
+    return Math.max(d[0], d[1], d[2]);
+  });
+  expect(before, 'the fixture should have painted something').toBeGreaterThan(40);
+
+  await app.page.locator('#newProject').click();
+  await expect.poll(async () => (await app.state()).sources.length).toBe(0);
+
+  const after = await app.page.evaluate(() => {
+    const c = document.getElementById('preview');
+    const { data, width, height } = c.getContext('2d').getImageData(0, 0, c.width, c.height);
+    let brightest = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      brightest = Math.max(brightest, data[i], data[i + 1], data[i + 2]);
+    }
+    return { brightest, width, height };
+  });
+  expect(after.brightest, 'the old frame is still on screen').toBeLessThan(20);
+});
+
+test('switching to another project repaints rather than keeping the old frame', async ({ app }) => {
+  await app.add('land');
+  await app.page.evaluate(() => window.seek(2));
+  await app.page.evaluate(() => window.newProject('Empty'));
+
+  const blank = await app.page.evaluate(() => {
+    const c = document.getElementById('preview');
+    const { data } = c.getContext('2d').getImageData(0, 0, c.width, c.height);
+    let brightest = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      brightest = Math.max(brightest, data[i], data[i + 1], data[i + 2]);
+    }
+    return brightest;
+  });
+  expect(blank).toBeLessThan(20);
+});

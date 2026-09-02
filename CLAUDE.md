@@ -19,7 +19,7 @@ Package manager is **pnpm** (pinned in `packageManager`).
 ```bash
 pnpm install
 pnpm dev              # Vite on http://localhost:5173
-pnpm test             # the gate: 178 Playwright tests in real Chrome
+pnpm test             # the gate: 188 Playwright tests in real Chrome
 pnpm build            # production bundle into dist/
 pnpm preview          # serve that bundle
 pnpm test:report      # open the HTML report
@@ -352,6 +352,16 @@ the failure: twice now the "flaky" test was reporting a real ordering bug.
 - The fixed rows (`.bar`, `.transport`, `.timeline`, `.sequence`) are `flex:
   none`. Without it they shrink and clip their own contents once the stack gets
   tall enough, rather than the preview giving up the space.
+- **All three list panels cache their shape.** `renderSources()` also keys its
+  rows by id and reuses the nodes, so importing appends a row rather than
+  discarding the ones already there. Without it a poster arriving a moment after
+  its import rebuilt the whole panel, which read as the list rendering twice.
+- **The canvas holds its last frame forever.** Anything that changes what should
+  be on screen has to repaint or wipe: `refreshPreview()` does that, and both
+  switching project and deleting the last source used to leave a stale frame up.
+- `updatePlayButton()` is the only thing that sets the play glyph. It is a
+  toggle for whichever view is showing, so setting it from inside one playback
+  path left sequence playback reading "play" the whole time it ran.
 - `renderTrack()` rebuilds only when its contents change, for the same reason
   `renderClips()` does: a rebuild triggered by `pointerdown` detaches the element
   before its own `click` can land, so clicking a track item did nothing.
@@ -402,8 +412,11 @@ themselves: those are draggable for reordering, and the two gestures would
 fight. Sequence time maps linearly onto the ruler because item widths are
 already proportional to their durations.
 
-One export button too, labelled for what it will render: `Export clip` in source
-view, `Export sequence` in sequence view.
+One export button, and it follows the **sequence, not the view**: once anything
+is on the sequence that is what export renders, whichever of the two you happen
+to be watching. The sequence is the finished edit, so exporting a lone source
+range from under one is almost never what was meant. Only an empty sequence
+falls back to the marked range. The label says which.
 
 Marking needs a source on screen, so `requireSource()` guards every route into
 it and raises a toast otherwise. Cutting from the sequence would silently take

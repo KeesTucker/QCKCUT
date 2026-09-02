@@ -64,7 +64,6 @@ const playBtn = $('playBtn');
 const exportBtn = $('exportBtn');
 const markInBtn = $('markIn');
 const markOutBtn = $('markOut');
-const addClipBtn = $('addClip');
 const addSourceBtn = $('addSource');
 const sourceList = $('sourceList');
 const clipList = $('clipList');
@@ -160,6 +159,24 @@ function paint(sample) {
   sample.drawWithFit(pctx, { fit: 'contain' });
 }
 
+/** Wipe the picture. Nothing to show is still something to render. */
+function clearPreview() {
+  preview.width = 640;
+  preview.height = 360;
+  paintSilence('');
+}
+
+/**
+ * Repaint whatever should be on screen now. Called after anything that can
+ * change what the viewer ought to be showing, because the canvas otherwise
+ * holds its last frame indefinitely.
+ */
+export async function refreshPreview() {
+  if (S.view === 'sequence' && S.timeline.length) return seekSequence(S.seqPlayhead);
+  if (S.view === 'source' && active() && held) return seek(S.playhead);
+  clearPreview();
+}
+
 /** What the preview shows for a source, or a sequence item, with no pictures. */
 function paintSilence(label) {
   pctx.fillStyle = '#000';
@@ -224,7 +241,7 @@ let playRun = null;
 export async function play() {
   if (S.playing || !held) return;
   S.playing = true;
-  playBtn.dataset.state = 'playing';
+  updatePlayButton();
 
   const from = S.playhead >= S.out - 0.02 ? S.in : S.playhead;
   const stopping = new AbortController();
@@ -301,7 +318,16 @@ export function pause() {
   playRun?.abort();
   playRun = null;
   audio.stopScrub();
-  playBtn.dataset.state = 'paused';
+  updatePlayButton();
+}
+
+// The button is a toggle for whichever view is showing, so it cannot be set
+// from inside one playback path alone: sequence playback used to leave it
+// reading "play" the entire time it ran.
+function updatePlayButton() {
+  const running = S.view === 'sequence' ? S.playingSeq : S.playing;
+  playBtn.dataset.state = running ? 'playing' : 'paused';
+  playBtn.setAttribute('aria-label', running ? 'Pause' : 'Play');
 }
 
 // ─── Filmstrip ───────────────────────────────────────────────────────────────
@@ -467,30 +493,70 @@ function updateRange() {
   rangeEl.textContent = `in ${timecode(S.in)} · out ${timecode(S.out)} · ${timecode(S.out - S.in)}`;
 }
 
+const sourceMeta = (source) => media.isVideo(source)
+  ? `${timecode(source.duration)} · ${source.width}×${source.height}`
+  : `${timecode(source.duration)} · audio`;
+
+// Rebuilt only when the list itself changes. A poster arrives a moment after
+// its source is imported, and rebuilding the row for it threw away perfectly
+// good DOM and made the panel visibly render twice per import.
+let sourceRows = new Map();
+let sourcesShape = null;
+
+const sourcesShapeOf = () => S.sources.map((s) => s.id).join(',');
+
 function renderSources() {
-  sourceList.replaceChildren(...S.sources.map((source) => {
-    const entry = document.createElement('li');
-    const { el } = row({
-      active: source.id === S.activeId,
-      name: source.name,
-      meta: media.isVideo(source)
-        ? `${timecode(source.duration)} · ${source.width}×${source.height}`
-        : `${timecode(source.duration)} · audio`,
-      onSelect: () => setActive(source.id).catch(fail),
-      onDrop: () => removeSource(source.id).catch(fail),
-      drag: { kind: 'source', id: source.id },
-      rename: { read: () => source.name, write: (next) => renameSource(source.id, next) },
+  if (sourcesShapeOf() !== sourcesShape) {
+    sourcesShape = sourcesShapeOf();
+    // Keyed by id and reused, so adding a source appends a row instead of
+    // discarding the ones already there.
+    const next = new Map();
+    const entries = S.sources.map((source) => {
+      const parts = sourceRows.get(source.id) ?? buildSourceRow(source);
+      next.set(source.id, parts);
+      return parts.entry;
     });
-    const poster = document.createElement('canvas');
-    poster.width = 56;
-    poster.height = 32;
-    if (source.poster) {
-      poster.getContext('2d').drawImage(source.poster, 0, 0, 56, 32);
+    sourceRows = next;
+    sourceList.replaceChildren(...entries);
+  }
+  syncSourceRows();
+}
+
+function buildSourceRow(source) {
+  const entry = document.createElement('li');
+  const parts = row({
+    active: source.id === S.activeId,
+    name: source.name,
+    meta: sourceMeta(source),
+    onSelect: () => setActive(source.id).catch(fail),
+    onDrop: () => removeSource(source.id).catch(fail),
+    drag: { kind: 'source', id: source.id },
+    rename: { read: () => source.name, write: (next) => renameSource(source.id, next) },
+  });
+
+  const poster = document.createElement('canvas');
+  poster.width = 56;
+  poster.height = 32;
+  parts.poster = poster;
+  parts.entry = entry;
+  parts.el.prepend(poster);
+  entry.append(parts.el);
+  return parts;
+}
+
+function syncSourceRows() {
+  for (const source of S.sources) {
+    const parts = sourceRows.get(source.id);
+    if (!parts) continue;
+    parts.el.classList.toggle('active', source.id === S.activeId);
+    if (!parts.name.dataset.editing) parts.name.textContent = source.name;
+    parts.meta.textContent = sourceMeta(source);
+    // Drawn once, when the poster first exists.
+    if (source.poster && parts.drawn !== source.poster) {
+      parts.poster.getContext('2d').drawImage(source.poster, 0, 0, 56, 32);
+      parts.drawn = source.poster;
     }
-    el.prepend(poster);
-    entry.append(el);
-    return entry;
-  }));
+  }
 }
 
 // Rebuilding the list detaches its nodes, and detaching a focused input blurs
@@ -747,13 +813,18 @@ function updateUI() {
   timeline.classList.toggle('empty', !loaded);
   drop.classList.toggle('hidden', S.sources.length > 0);
   controls.classList.toggle('hidden', !loaded && !S.timeline.length);
-  for (const b of [markInBtn, markOutBtn, addClipBtn]) b.disabled = !loaded;
+  for (const b of [markInBtn, markOutBtn]) b.disabled = !loaded;
 
-  const onSequence = S.view === 'sequence';
-  playBtn.disabled = onSequence ? !S.timeline.length : !loaded;
-  // Export renders whatever the viewer is showing, and says so.
-  exportBtn.textContent = onSequence ? 'Export sequence' : 'Export clip';
-  exportBtn.disabled = S.exporting || (onSequence ? !S.timeline.length : !loaded);
+  playBtn.disabled = S.view === 'sequence' ? !S.timeline.length : !loaded;
+  updatePlayButton();
+
+  // Export follows the sequence, not the view: see exportShowing().
+  const hasSequence = S.timeline.length > 0;
+  exportBtn.textContent = hasSequence ? 'Export sequence' : 'Export clip';
+  exportBtn.title = hasSequence
+    ? 'Render the whole sequence'
+    : 'Render the marked range. Put something on the sequence to render that instead.';
+  exportBtn.disabled = S.exporting || (hasSequence ? false : !loaded);
   renderSources();
   renderClips();
   renderTrack();
@@ -837,6 +908,8 @@ export async function removeSource(id) {
 
   if (!S.activeId && S.sources.length) await setActive(S.sources[0].id);
   else updateUI();
+  // Deleting the last source used to leave its final frame on screen.
+  await refreshPreview();
 }
 
 // ─── Clips ────────────────────────────────────────────────────────────────────
@@ -1238,6 +1311,7 @@ export async function playSequence() {
   if (S.playingSeq || !S.timeline.length) return;
   pause();
   S.playingSeq = true;
+  updatePlayButton();
 
   const rows = sequenceRows();
   const total = rows[rows.length - 1].end;
@@ -1338,6 +1412,7 @@ export function stopSequence() {
   seqRun?.abort();
   seqRun = null;
   stopMusic();
+  updatePlayButton();
   renderTrack();
 }
 
@@ -1642,7 +1717,6 @@ markOutBtn.addEventListener('click', () => {
   syncActiveClip().catch(fail);
 });
 
-addClipBtn.addEventListener('click', () => markClip().catch(fail));
 addSourceBtn.addEventListener('click', () => pickFiles());
 
 document.addEventListener('keydown', (event) => {
@@ -1847,9 +1921,15 @@ function requireSource() {
   return false;
 }
 
-/** One export button for both, matching the play button. */
+/**
+ * The sequence is the deliverable. Once anything is on it, that is what export
+ * renders, whichever of the two the viewer happens to be showing: exporting a
+ * lone source range from under a finished edit is almost never what was meant.
+ * With an empty sequence there is nothing else it could mean, so it falls back
+ * to the marked range.
+ */
 export function exportShowing() {
-  return S.view === 'sequence' ? exportSequence() : exportRange();
+  return S.timeline.length ? exportSequence() : exportRange();
 }
 
 /** One play button for both. */
@@ -1966,7 +2046,14 @@ function forgetProject() {
   // Both lists rebuild from scratch, so their caches must not survive.
   clipsShape = null;
   trackShape = null;
+  sourcesShape = null;
+  sourceRows = new Map();
   nextId = 1;
+
+  // The canvas holds whatever it last painted, so without this a new project
+  // opens showing the previous one's frame.
+  clearPreview();
+  clearWarning();
 }
 
 export async function openProject(id) {
@@ -2201,6 +2288,7 @@ Object.assign(window, {
   appendRange, playSequence, stopSequence, exportSequence, sequenceShape,
   setView, seekSequence, togglePlay, seqTimeForX, exportShowing, warn, clearWarning,
   boot, openProject, newProject, renameProject, dropProject, setSettings, outputShape,
+  refreshPreview,
   audio, setMusic, setMusicFromSource, removeMusic, setMusicGain, setMuted, setRate,
   timecode, parseTimecode, clamp, clipLabel, exportName, setClipRange,
 });

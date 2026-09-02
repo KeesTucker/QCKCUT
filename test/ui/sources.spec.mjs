@@ -105,3 +105,46 @@ test('importing a burst of sources never exceeds the decoder pool', async ({ app
     expect(source.thumbsDecoded, `${source.name} strip incomplete`).toBe(source.thumbCount);
   }
 });
+
+// Regression: the preview canvas holds its last frame, so deleting the last
+// source left its final frame on screen with nothing to explain it.
+test('deleting the last source clears the preview', async ({ app }) => {
+  await app.add('land');
+  await app.page.evaluate(() => window.seek(2));
+
+  const painted = await app.page.evaluate(() => {
+    const c = document.getElementById('preview');
+    const d = c.getContext('2d').getImageData(c.width >> 1, c.height >> 1, 1, 1).data;
+    return Math.max(d[0], d[1], d[2]);
+  });
+  expect(painted).toBeGreaterThan(40);
+
+  const id = (await app.state()).sources[0].id;
+  await app.page.evaluate((x) => window.removeSource(x), id);
+
+  const brightest = await app.page.evaluate(() => {
+    const c = document.getElementById('preview');
+    const { data } = c.getContext('2d').getImageData(0, 0, c.width, c.height);
+    let max = 0;
+    for (let i = 0; i < data.length; i += 4) max = Math.max(max, data[i], data[i + 1], data[i + 2]);
+    return max;
+  });
+  expect(brightest, 'the deleted source is still on screen').toBeLessThan(20);
+});
+
+test('deleting one of several repaints with the one that takes over', async ({ app }) => {
+  await app.add('land', 'port');
+  const s = await app.state();
+  await app.page.evaluate((id) => window.removeSource(id), s.activeId);
+
+  await expect.poll(async () => (await app.state()).sources.length).toBe(1);
+  // Something is still showing: the source that took over, not a blank canvas.
+  const brightest = await app.page.evaluate(() => {
+    const c = document.getElementById('preview');
+    const { data } = c.getContext('2d').getImageData(0, 0, c.width, c.height);
+    let max = 0;
+    for (let i = 0; i < data.length; i += 4) max = Math.max(max, data[i], data[i + 1], data[i + 2]);
+    return max;
+  });
+  expect(brightest).toBeGreaterThan(40);
+});

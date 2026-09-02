@@ -133,3 +133,35 @@ test('the speed does not reach the export', async ({ app }) => {
   // Speed is a preview control: the render is still two real seconds.
   expect(duration).toBeCloseTo(2, 1);
 });
+
+// Regression: sequence playback never touched the button, so it read "play" for
+// the whole time it was running. The button is a toggle for whichever view is
+// showing, so one place has to decide how it looks.
+test('the play button shows pause while the sequence is playing', async ({ app }) => {
+  await app.add('land');
+  await app.page.evaluate(() => { window.S.in = 0; window.S.out = 2; return window.appendRange(); });
+  await app.page.evaluate(() => window.setView('sequence'));
+
+  const play = app.page.locator('#playBtn');
+  await expect(play).toHaveAttribute('data-state', 'paused');
+
+  await app.page.evaluate(() => { window.togglePlay(); });
+  await expect(play).toHaveAttribute('data-state', 'playing');
+  await expect(play.locator('.pause')).toBeVisible();
+
+  await app.page.evaluate(() => window.stopSequence());
+  await expect(play).toHaveAttribute('data-state', 'paused');
+  await expect(play.locator('.play')).toBeVisible();
+});
+
+test('the button reflects the view it is showing, not the other one', async ({ app }) => {
+  await app.add('land');
+  await app.page.evaluate(() => { window.S.in = 0; window.S.out = 3; return window.appendRange(); });
+
+  // Source playing, then switch to the sequence, which is not playing.
+  await app.page.evaluate(() => { window.S.in = 0; window.S.out = 3; window.play(); });
+  await expect(app.page.locator('#playBtn')).toHaveAttribute('data-state', 'playing');
+
+  await app.page.evaluate(() => window.setView('sequence'));
+  await expect(app.page.locator('#playBtn')).toHaveAttribute('data-state', 'paused');
+});

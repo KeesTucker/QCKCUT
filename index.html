@@ -85,10 +85,9 @@
   <aside class="panel panel-right">
     <div class="panel-head">
       <h2>Clips</h2>
-      <button id="addClip" class="ghost" title="Clip from the current in and out (C)" disabled>+</button>
     </div>
     <ul id="clipList" class="list"></ul>
-    <p id="clipEmpty" class="empty">Mark in and out, then press C</p>
+    <p id="clipEmpty" class="empty">Scrub to the start, press C, scrub to the end, press C again</p>
   </aside>
 
 </main>
@@ -209,10 +208,12 @@
 
       <section>
         <h4>Export</h4>
-        <p><kbd>Export</kbd> renders whatever the viewer is showing, and says which: the source's
-        marked range, or the whole sequence. Both come out as an MP4 with audio. Encoding runs on
-        your GPU, so it is usually several times faster than the result is long. The preview speed
-        never affects it.</p>
+        <p>The sequence is the finished edit, so once anything is on it <kbd>Export</kbd> renders
+        the whole sequence, whichever of the two you happen to be watching. With an empty sequence
+        it renders the marked range instead. The button always says which. Both come out as an MP4
+        with audio at whatever <kbd>Settings</kbd> asks for. Encoding runs on your GPU, so it is
+        usually several times faster than the result is long, and the preview speed never affects
+        it.</p>
       </section>
 
       <section>
