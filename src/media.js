@@ -33,12 +33,14 @@ export async function acquire(source) {
       throw new Error(`${source.name}: no video or audio track`);
     }
     if (track && !(await track.canDecode())) {
+      const why = await explain(track);
       input.dispose();
-      throw new Error(`${source.name}: cannot decode ${track.codec ?? 'this codec'}`);
+      throw new Error(`${source.name}: ${why}`);
     }
     if (!track && !(await sound.canDecode())) {
       input.dispose();
-      throw new Error(`${source.name}: cannot decode ${sound.codec ?? 'this codec'}`);
+      throw new Error(
+        `${source.name}: this browser cannot decode ${sound.codec ?? 'that audio codec'}`);
     }
 
     entry = {
@@ -54,6 +56,81 @@ export async function acquire(source) {
   entry.touched = ++clock;
   evict();
   return entry;
+}
+
+// ─── What this browser can decode ────────────────────────────────────────────
+// Codec availability is a property of the browser, its version and the machine
+// it runs on, not of the file. HEVC is the sharp edge: Chrome needs hardware
+// support, Firefox only gained it in 134-137 depending on platform (and on
+// Windows behind a paid extension), and Safari has had it for years. So the
+// only honest answer is to ask at runtime, which is what MDN recommends:
+// https://developer.mozilla.org/en-US/docs/Web/API/WebCodecs_API/Codec_selection
+
+/** One representative config per codec, enough to answer "at all?". */
+const PROBES = {
+  video: [
+    ['H.264', 'avc', 'avc1.640028'],
+    ['HEVC / H.265', 'hevc', 'hvc1.1.6.L93.B0'],
+    ['VP9', 'vp9', 'vp09.00.10.08'],
+    ['VP8', 'vp8', 'vp8'],
+    ['AV1', 'av1', 'av01.0.04M.08'],
+  ],
+  audio: [
+    ['AAC', 'aac', 'mp4a.40.2'],
+    ['Opus', 'opus', 'opus'],
+    ['MP3', 'mp3', 'mp3'],
+    ['FLAC', 'flac', 'flac'],
+    ['Vorbis', 'vorbis', 'vorbis'],
+  ],
+};
+
+const decodable = async (kind, codec) => {
+  const Decoder = kind === 'video' ? globalThis.VideoDecoder : globalThis.AudioDecoder;
+  if (!Decoder) return false;
+  try {
+    const { supported } = await Decoder.isConfigSupported(kind === 'video'
+      ? { codec, codedWidth: 1920, codedHeight: 1080 }
+      : { codec, sampleRate: 48_000, numberOfChannels: 2 });
+    return !!supported;
+  } catch {
+    // An unrecognised codec string throws rather than answering false.
+    return false;
+  }
+};
+
+/** What this browser will decode, for the help dialog. */
+export async function support() {
+  const answer = { webCodecs: !!globalThis.VideoDecoder, video: [], audio: [] };
+  for (const kind of ['video', 'audio']) {
+    for (const [label, name, codec] of PROBES[kind]) {
+      answer[kind].push({ label, name, supported: await decodable(kind, codec) });
+    }
+  }
+  return answer;
+}
+
+/**
+ * Why a track will not decode, in words worth reading. "cannot decode hevc" is
+ * true but useless: what matters is whether this is the browser's limit or the
+ * file's, and the user can act on the first by opening it somewhere else.
+ */
+async function explain(track) {
+  const codec = track.codec ?? 'that codec';
+  if (!globalThis.VideoDecoder) {
+    return 'this browser has no WebCodecs support, so it cannot decode video here';
+  }
+
+  const string = await track.getCodecParameterString().catch(() => null);
+  if (!string) return `this browser cannot decode ${codec}`;
+
+  // Does it know the codec at all, or only not this flavour of it?
+  const family = await decodable('video', string);
+  if (!family) {
+    return `this browser cannot decode ${codec}. `
+      + 'Support depends on the browser and the machine, not the file, so it may open elsewhere';
+  }
+  return `${codec} decodes here, but not this file's ${string} `
+    + `at ${track.codedWidth}×${track.codedHeight}`;
 }
 
 export function release(sourceId) {

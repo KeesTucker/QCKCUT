@@ -989,7 +989,11 @@ export async function addSource(file) {
   setStatus(`reading ${file.name}…`);
   remember(`import ${file.name}`);
   const source = { id: mintId('s'), name: file.name, blob: file, thumbs: [], thumbCount: 0, poster: null, posterUrl: null };
-  Object.assign(source, await media.probe(source));
+  // The decoder's own wording never mentions the file, and with several
+  // importing at once that is the first thing you want to know.
+  const probed = await media.probe(source)
+    .catch((error) => { throw new Error(`${file.name}: ${error?.message ?? error}`); });
+  Object.assign(source, probed);
   S.sources.push(source);
   await store.putSource(source);
   await setActive(source.id);
@@ -2749,7 +2753,33 @@ setTracksHeight(Number(localStorage.getItem(TRACKS_KEY)) || naturalTracksHeight(
 // ─── Help ────────────────────────────────────────────────────────────────────
 
 const helpOverlay = $('helpOverlay');
-const openHelp = () => helpOverlay.classList.add('visible');
+const openHelp = () => {
+  helpOverlay.classList.add('visible');
+  showFormats().catch(fail);
+};
+
+// Asked when the dialog opens rather than at boot: it costs a handful of
+// isConfigSupported calls, and the answer cannot change while the tab is open.
+let formatsShown = false;
+
+async function showFormats() {
+  if (formatsShown) return;
+  const box = $('formatSupport');
+  const answer = await media.support();
+  formatsShown = true;
+
+  if (!answer.webCodecs) {
+    box.textContent = 'This browser has no WebCodecs support, so it cannot open video at all.';
+    return;
+  }
+  box.replaceChildren(...[...answer.video, ...answer.audio].map((entry) => {
+    const chip = document.createElement('span');
+    chip.className = 'format';
+    chip.dataset.ok = entry.supported ? 'yes' : 'no';
+    chip.textContent = entry.label;
+    return chip;
+  }));
+}
 const closeHelp = () => helpOverlay.classList.remove('visible');
 const helpOpen = () => helpOverlay.classList.contains('visible');
 
@@ -2761,9 +2791,17 @@ helpOverlay.addEventListener('click', (event) => {
 
 // ─── Wiring ──────────────────────────────────────────────────────────────────
 
+/**
+ * Anything that went wrong, said over the picture. It used to write to the
+ * header and the console only, which meant a file that would not import failed
+ * in a place nobody was looking.
+ */
 function fail(error) {
   console.error(error);
-  setStatus(error?.message ?? String(error));
+  const message = error?.message ?? String(error);
+  setStatus('');
+  warn('That did not work', message);
+  return null;
 }
 
 const isVideo = (file) =>
@@ -3232,7 +3270,7 @@ Object.assign(window, {
   setView, seekSequence, togglePlay, seqTimeForX, exportShowing, warn, clearWarning,
   setTracksHeight,
   boot, openProject, newProject, renameProject, dropProject, setSettings, outputShape,
-  undo, redo, remember, historyDepth, notice,
+  undo, redo, remember, historyDepth, notice, showFormats,
   cancelExport, transitions, transitionAt, setTransition, selectBoundary,
   addAudioTrack, removeAudioTrack, moveBetweenLanes, setItemAudio, itemLevel,
   liveSyncActiveClip,

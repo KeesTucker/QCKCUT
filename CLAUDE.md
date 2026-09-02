@@ -19,7 +19,7 @@ Package manager is **pnpm** (pinned in `packageManager`).
 ```bash
 pnpm install
 pnpm dev              # Vite on http://localhost:5173
-pnpm test             # the gate: 276 Playwright tests in real Chrome
+pnpm test             # the gate: 281 Playwright tests in real Chrome
 pnpm build            # production bundle into dist/
 pnpm preview          # serve that bundle
 pnpm test:report      # open the HTML report
@@ -189,6 +189,27 @@ deleting closes the gap because there was never a gap to begin with.
 
 `sequence.move(items, from, to)` takes `to` as an index into the array *before*
 the move, which is what a drop position naturally gives you.
+
+## What opens, and where the codec answer lives
+
+Containers come from mediabunny: MP4, MOV (QuickTime), WebM, Matroska, MPEG-TS,
+HLS, plus MP3, WAV, FLAC, Ogg and ADTS for sound.
+
+**Codecs are a property of the browser and the machine, not the file.** Decoding
+goes through WebCodecs, so the only honest answer is to ask at runtime, which is
+what MDN recommends. `media.support()` probes one representative config per
+codec through `VideoDecoder.isConfigSupported` / `AudioDecoder.isConfigSupported`
+and the help dialog lists the result; `explain()` uses the same probe to say
+whether a refused file is the browser's limit or the file's flavour of a codec
+the browser does otherwise know.
+
+An unrecognised codec string makes `isConfigSupported` **reject**, not answer
+false, so every probe is wrapped.
+
+HEVC is the sharp edge: Chrome needs hardware support, Firefox only gained it in
+134-137 depending on platform (behind a paid extension on Windows), Safari has
+had it for years. A file that will not open here may open elsewhere, and the
+message says so.
 
 ## Invariants that will bite you
 
@@ -408,6 +429,9 @@ the failure: twice now the "flaky" test was reporting a real ordering bug.
   `deleteObjectStore` in the upgrade path. Currently at v2, which renamed `cuts`
   to `clips`.
 - `store.clearAll()` clears the database, not the in-memory `S`. Reload after it.
+- `fail()` raises the toast as well as logging. The `app` fixture forbids console
+  errors, so a spec that provokes one calls `app.allowErrors(/pattern/)`; the
+  guard stays on for everything else.
 - `row()` returns `{ el, name, meta }`, not an element, so callers can update the
   text nodes in place instead of rebuilding the row.
 - `setPointerCapture` throws if the pointer has already gone, so it is wrapped:

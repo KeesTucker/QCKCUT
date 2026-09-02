@@ -41,7 +41,9 @@ test('dragging the ruler scrubs across the cuts', async ({ app }) => {
   await app.page.mouse.down();
 
   await app.page.mouse.move(box.x + box.width * 0.25, box.y + box.height / 2, { steps: 8 });
-  await expect.poll(async () => (await app.state()).seqPlayhead).toBeCloseTo(1, 0);
+  // Generous: each move decodes a frame, and the whole suite runs in parallel.
+  await expect.poll(async () => (await app.state()).seqPlayhead, { timeout: 15_000 })
+    .toBeCloseTo(1, 0);
 
   // Past the cut at 2s, into the second item.
   await app.page.mouse.move(box.x + box.width * 0.85, box.y + box.height / 2, { steps: 12 });

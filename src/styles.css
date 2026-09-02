@@ -1145,3 +1145,22 @@ body.resizing { cursor: ns-resize; user-select: none; }
 }
 .warn-toast.notice .wt-icon,
 .warn-toast.notice .wt-title { color: var(--accent); }
+
+/* What this browser can decode, asked at runtime */
+.formats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 8px 0;
+}
+.format {
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.format[data-ok="yes"] { border-color: #2f6b3f; background: rgba(64, 160, 92, .12); color: #86d6a2; }
+.format[data-ok="no"] { color: var(--dim); opacity: .6; }
+.format[data-ok="no"]::after { content: " ✕"; }
+.format[data-ok="yes"]::after { content: " ✓"; }

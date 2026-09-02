@@ -26,9 +26,18 @@ export const test = base.extend({
     await page.reload();
     await page.waitForFunction(() => window.S?.project);
 
+    // Tests that deliberately provoke a failure whitelist it here. The guard
+    // stays on for everything else, which is the point of it.
+    const allowed = [];
+
     const app = {
       page,
       errors,
+
+      /** Expect errors matching this pattern; anything else still fails. */
+      allowErrors(pattern) {
+        allowed.push(pattern);
+      },
 
       /** Import one of the rendered test clips by name. */
       async add(...names) {
@@ -79,7 +88,8 @@ export const test = base.extend({
     };
 
     await use(app);
-    expect(errors, `page logged errors:\n${errors.join('\n')}`).toEqual([]);
+    const unexpected = errors.filter((e) => !allowed.some((p) => p.test(e)));
+    expect(unexpected, `page logged errors:\n${unexpected.join('\n')}`).toEqual([]);
   },
 });
 

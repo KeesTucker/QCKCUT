@@ -61,6 +61,8 @@ test('the warning fades on its own', async ({ app }) => {
   await app.page.evaluate(() => window.setView('sequence'));
   await app.page.keyboard.press('c');
   await expect(toast(app)).toBeVisible();
-  // It clears itself rather than needing a dismiss.
-  await expect(toast(app)).toBeHidden({ timeout: 8000 });
+  // It clears itself rather than needing a dismiss. The window is generous
+  // because the point is "by itself", not "within exactly four seconds", and a
+  // loaded machine delays timers.
+  await expect(toast(app)).toBeHidden({ timeout: 15_000 });
 });

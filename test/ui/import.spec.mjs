@@ -87,3 +87,33 @@ test('importing more sources leaves the existing rows alone', async ({ app }) =>
   // A new row is added; the one already there is not thrown away.
   expect(probe).toBe('first');
 });
+
+// Regression: import failures went to the console and the header only, which is
+// nowhere anyone looks. A file that will not open has to say so.
+/** Drop a file the way a person would, rather than calling the importer. */
+async function dropJunk(app, name) {
+  await app.page.evaluate((filename) => {
+    // Valid bytes, no media in them.
+    const dt = new DataTransfer();
+    dt.items.add(new File([new Uint8Array(2048)], filename, { type: 'video/mp4' }));
+    document.dispatchEvent(
+      new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+  }, name);
+}
+
+test('a file that will not open says so over the picture', async ({ app }) => {
+  app.allowErrors(/unsupported or unrecognizable/i);
+  await dropJunk(app, 'broken.mp4');
+
+  await expect(app.page.locator('#warnToast')).toBeVisible();
+  await expect(app.page.locator('#warnTitle')).toHaveText('That did not work');
+  await expect(app.page.locator('#warnMsg')).not.toBeEmpty();
+  expect((await app.state()).sources, 'a broken file became a source').toHaveLength(0);
+});
+
+test('the failure names the file', async ({ app }) => {
+  app.allowErrors(/unsupported or unrecognizable/i);
+  await dropJunk(app, 'holiday.mp4');
+  // mediabunny's own wording carries no filename, so we add it.
+  await expect(app.page.locator('#warnMsg')).toContainText('holiday.mp4');
+});
