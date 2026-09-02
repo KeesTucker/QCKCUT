@@ -15,6 +15,18 @@ import {
 } from 'mediabunny';
 import * as media from './media.js';
 
+/** Thrown when a render is stopped on purpose, so callers can tell it apart. */
+export class Cancelled extends Error {
+  constructor() {
+    super('export cancelled');
+    this.name = 'Cancelled';
+  }
+}
+
+const stopIf = (signal) => {
+  if (signal?.aborted) throw new Cancelled();
+};
+
 const EPSILON = 1e-6;
 const AUDIO_RATE = 48_000;
 const AUDIO_CHANNELS = 2;
@@ -23,7 +35,7 @@ const AUDIO_CHANNELS = 2;
  * Render one range of one source. Keeps the source's audio, and passes packets
  * through untouched unless the output settings ask for a different shape.
  */
-export async function renderClip(source, start, end, onProgress, settings = {}) {
+export async function renderClip(source, start, end, onProgress, settings = {}, signal) {
   // A fresh Input so export never disturbs the preview pool.
   const input = new Input({ source: new BlobSource(source.blob), formats: ALL_FORMATS });
   try {
@@ -40,8 +52,12 @@ export async function renderClip(source, start, end, onProgress, settings = {}) 
       trim: { start, end },
       ...(Object.keys(video).length ? { video } : {}),
     });
-    if (onProgress) conversion.onProgress = onProgress;
+    if (onProgress) conversion.onProgress = (p) => onProgress(p, 'video');
+    if (signal) {
+      signal.addEventListener('abort', () => { conversion.cancel().catch(() => {}); }, { once: true });
+    }
     await conversion.execute();
+    stopIf(signal);
     return new Blob([output.target.buffer], { type: 'video/mp4' });
   } finally {
     input.dispose();
@@ -52,8 +68,13 @@ export async function renderClip(source, start, end, onProgress, settings = {}) 
  * Render a laid-out sequence. `rows` come from `sequence.layout()`, `sourceOf`
  * resolves an item to its source. Output takes the first item's dimensions;
  * everything else is letterboxed into them.
+ *
+ * `onProgress(fraction, phase)` is called for both phases. Audio is mixed
+ * before any picture is touched, and on a long sequence that is many seconds
+ * with nothing to show for it, so the phase is reported rather than left to
+ * look like a hang.
  */
-export async function renderSequence(rows, sourceOf, onProgress, music = null, shape = null, fps = null) {
+export async function renderSequence(rows, sourceOf, onProgress, music = null, shape = null, fps = null, signal) {
   if (!rows.length) throw new Error('the sequence is empty');
   // The caller picks the shape, because the first item may be audio and have
   // no dimensions of its own.
@@ -72,7 +93,8 @@ export async function renderSequence(rows, sourceOf, onProgress, music = null, s
   // Audio is mixed first: the track has to exist before the output starts, and
   // we only add one if at least one item actually has sound.
   const total = rows[rows.length - 1].end;
-  const mixed = await mixAudio(rows, sourceOf, total, music);
+  onProgress?.(0, 'audio');
+  const mixed = await mixAudio(rows, sourceOf, total, music, onProgress, signal);
   const audio = mixed ? new AudioBufferSource({ codec: 'aac', bitrate: QUALITY_HIGH }) : null;
   if (audio) output.addAudioTrack(audio);
 
@@ -81,8 +103,25 @@ export async function renderSequence(rows, sourceOf, onProgress, music = null, s
     await audio.add(mixed);
     audio.close();
   }
+  onProgress?.(0, 'video');
 
+  try {
+    await renderFrames({ rows, sourceOf, ctx, canvas, video, total, fps, onProgress, signal });
+  } catch (error) {
+    // A started Output holds an encoder, so it has to be cancelled either way.
+    await output.cancel().catch(() => {});
+    throw error;
+  }
+
+  video.close();
+  await output.finalize();
+  onProgress?.(1, 'video');
+  return new Blob([output.target.buffer], { type: 'video/mp4' });
+}
+
+async function renderFrames({ rows, sourceOf, ctx, canvas, video, total, fps, onProgress, signal }) {
   for (const row of rows) {
+    stopIf(signal);
     const source = sourceOf(row.item);
     if (!source) continue;
 
@@ -92,7 +131,7 @@ export async function renderSequence(rows, sourceOf, onProgress, music = null, s
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       await video.add(row.start, row.duration);
-      onProgress?.(Math.min(1, row.end / total));
+      onProgress?.(Math.min(1, row.end / total), 'video');
       continue;
     }
 
@@ -108,6 +147,7 @@ export async function renderSequence(rows, sourceOf, onProgress, music = null, s
           const at = row.start + k / fps;
           k++;
           if (!sample) continue;
+          if (signal?.aborted) { sample.close(); throw new Cancelled(); }
           try {
             ctx.fillStyle = '#000';
             ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -130,7 +170,14 @@ export async function renderSequence(rows, sourceOf, onProgress, music = null, s
       // audio mix uses exact boundaries, so the two drift apart by up to a
       // frame per cut.
       const frames = sink.samples(row.item.in, row.item.out)[Symbol.asyncIterator]();
-      const atOf = (timestamp) => row.start + (timestamp - row.item.in);
+      // samples() also yields the frame *containing* the in point, which can
+      // start before it. Clamped into the item's own span, so the first frame
+      // of the sequence lands at 0 rather than slightly before it, which the
+      // muxer rejects outright.
+      const atOf = (timestamp) => {
+        const at = row.start + (timestamp - row.item.in);
+        return at < row.start ? row.start : at > row.end ? row.end : at;
+      };
       const past = (sample) => sample.timestamp >= row.item.out - EPSILON;
 
       let step = await frames.next();
@@ -141,6 +188,12 @@ export async function renderSequence(rows, sourceOf, onProgress, music = null, s
           sample.close();
           await frames.return?.();
           break;
+        }
+
+        if (signal?.aborted) {
+          sample.close();
+          await frames.return?.();
+          throw new Cancelled();
         }
 
         const lookahead = await frames.next();
@@ -164,10 +217,6 @@ export async function renderSequence(rows, sourceOf, onProgress, music = null, s
     });
   }
 
-  video.close();
-  await output.finalize();
-  onProgress?.(1);
-  return new Blob([output.target.buffer], { type: 'video/mp4' });
 }
 
 /**
@@ -179,7 +228,7 @@ export async function renderSequence(rows, sourceOf, onProgress, music = null, s
  *
  * Returns null when there is nothing to hear at all.
  */
-async function mixAudio(rows, sourceOf, total, music) {
+async function mixAudio(rows, sourceOf, total, music, onProgress) {
   if (total <= 0) return null;
   const context = new OfflineAudioContext(
     AUDIO_CHANNELS, Math.ceil(total * AUDIO_RATE), AUDIO_RATE);
@@ -221,7 +270,11 @@ async function mixAudio(rows, sourceOf, total, music) {
     });
   }
 
-  return found ? context.startRendering() : null;
+  if (!found) return null;
+  // startRendering() is proportional to the sequence length and reports
+  // nothing, so say what is happening before disappearing into it.
+  onProgress?.(1, 'audio');
+  return context.startRendering();
 }
 
 /** Hand a rendered blob to the browser as a download. */

@@ -164,3 +164,79 @@ test('picture and sound stay locked to the same boundaries', async ({ app }) => 
   expect(result.videoDuration).toBeCloseTo(expected, 2);
   expect(result.hasAudio).toBe(true);
 });
+
+// Regression: audio is mixed before any picture is touched, and nothing
+// reported during it, so a long sequence sat on a dead-looking button for
+// seconds before the first "rendering" appeared.
+test('export says something immediately, and names both phases', async ({ app }) => {
+  test.setTimeout(120_000);
+  await build(app, { clip: 'tone', in: 0, out: 1.5 });   // tone carries audio
+
+  const seen = await app.page.evaluate(async () => {
+    const label = document.getElementById('exportLabel');
+    const seen = [];
+    const record = () => {
+      const text = label.textContent;
+      if (text && seen.at(-1) !== text) seen.push(text);
+    };
+    const timer = setInterval(record, 5);
+
+    HTMLAnchorElement.prototype.click = function () {};
+    document.getElementById('exportBtn').click();
+    // Whatever it says, it must say it before yielding.
+    const immediate = label.textContent;
+
+    while (window.S.exporting) await new Promise((r) => setTimeout(r, 20));
+    clearInterval(timer);
+    return { immediate, seen, status: document.getElementById('status').textContent };
+  });
+
+  expect(seen.immediate, 'the button looked dead on click').not.toBe('');
+  expect(seen.seen.some((t) => t.startsWith('Mixing audio'))).toBe(true);
+  expect(seen.seen.some((t) => t.startsWith('Rendering'))).toBe(true);
+  expect(seen.status).toMatch(/^rendered /);
+
+  // Audio is mixed first, so its progress must appear before the picture's.
+  const firstAudio = seen.seen.findIndex((t) => t.startsWith('Mixing audio'));
+  const firstVideo = seen.seen.findIndex((t) => t.startsWith('Rendering'));
+  expect(firstAudio).toBeLessThan(firstVideo);
+});
+
+test('a silent sequence still reports before it starts', async ({ app }) => {
+  test.setTimeout(120_000);
+  await build(app, { clip: 'land', in: 0, out: 1 });     // land has no audio
+
+  const immediate = await app.page.evaluate(() => {
+    HTMLAnchorElement.prototype.click = function () {};
+    document.getElementById('exportBtn').click();
+    return document.getElementById('exportLabel').textContent;
+  });
+  expect(immediate).not.toBe('');
+  await expect.poll(async () => app.page.evaluate(() => window.S.exporting), { timeout: 60_000 })
+    .toBe(false);
+});
+
+// Regression: samples(in, out) yields the frame *containing* the in point,
+// which can start before it. For the first item that made `at` negative and the
+// muxer refused it with "timestamp must be a non-negative number". Every
+// in-point here deliberately falls between frames at 30fps.
+test('in points that are not on a frame boundary still render', async ({ app }) => {
+  test.setTimeout(120_000);
+  await build(app,
+    { clip: 'land', in: 1.137, out: 2.611 },
+    { clip: 'hd', in: 0.409, out: 1.283 });
+
+  const result = await render(app, [0, 1.2, 2]);
+  expect(result.videoDuration).toBeCloseTo(1.474 + 0.874, 1);
+  expect(result.frames.every((f) => f !== null)).toBe(true);
+  expect(result.frames[0]).toBeGreaterThanOrEqual(0);
+});
+
+test('a first item starting mid-frame does not produce a negative timestamp', async ({ app }) => {
+  test.setTimeout(120_000);
+  // 0.017s is half a frame in at 30fps, so the containing frame starts at 0.
+  await build(app, { clip: 'land', in: 0.017, out: 1.017 });
+  const result = await render(app, [0]);
+  expect(result.frames[0]).toBe(0);
+  expect(result.videoDuration).toBeCloseTo(1, 1);
+});

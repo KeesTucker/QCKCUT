@@ -833,3 +833,63 @@ button.ghost.text {
   font-variant-numeric: tabular-nums;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
+
+/* Export progress. The bar takes the whole menu's width while it runs, because
+   nothing in that menu can be used until it finishes. */
+.menu {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.menu[hidden] { display: none; }
+
+.export-bar {
+  position: relative;
+  flex: 1;
+  height: 26px;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--s2);
+}
+.export-bar[hidden] { display: none; }
+
+.export-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0;
+  background: var(--grad);
+  transition: width .18s ease-out;
+}
+
+.export-label {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  /* Readable over both the filled and unfilled halves. */
+  color: var(--text);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, .65);
+}
+
+/* Nothing below the header is touchable while a render is running: the edit
+   would apply to a project the render has already read past. */
+body.busy .workspace,
+body.busy .transport,
+body.busy .timeline,
+body.busy .sequence {
+  pointer-events: none;
+  opacity: .5;
+}
+
+body.busy #exportBtn {
+  border-color: var(--line);
+  background: var(--s2);
+  color: var(--text);
+}
+body.busy #exportBtn:hover { background: var(--s3); opacity: 1; }

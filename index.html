@@ -13,14 +13,21 @@
   <h1>QCKCUT</h1>
   <button class="help-btn" id="helpBtn" aria-label="Help" aria-haspopup="dialog" title="Help">?</button>
 
-  <span class="divider"></span>
-  <span id="projectName" class="project-name" tabindex="0">Untitled</span>
-  <button id="newProject" class="ghost text">New</button>
-  <button id="openProject" class="ghost text">Open</button>
-  <button id="settingsBtn" class="ghost text">Settings</button>
+  <span class="menu" id="menu">
+    <span class="divider"></span>
+    <span id="projectName" class="project-name" tabindex="0">Untitled</span>
+    <button id="newProject" class="ghost text">New</button>
+    <button id="openProject" class="ghost text">Open</button>
+    <button id="settingsBtn" class="ghost text">Settings</button>
+    <span class="spacer"></span>
+    <span id="status" class="status"></span>
+  </span>
 
-  <span class="spacer"></span>
-  <span id="status" class="status"></span>
+  <div class="export-bar" id="exportBar" hidden role="progressbar" aria-valuemin="0" aria-valuemax="100">
+    <div class="export-fill" id="exportFill"></div>
+    <span class="export-label" id="exportLabel"></span>
+  </div>
+
   <button id="exportBtn" disabled>Export</button>
 </header>
 
@@ -214,6 +221,9 @@
         with audio at whatever <kbd>Settings</kbd> asks for. Encoding runs on your GPU, so it is
         usually several times faster than the result is long, and the preview speed never affects
         it.</p>
+        <p>While a render runs the header becomes a progress bar and the button becomes
+        <kbd>Cancel</kbd>; <kbd>Esc</kbd> stops it too. Everything else is held still, because an
+        edit made halfway through would apply to a project the render has already read past.</p>
       </section>
 
       <section>

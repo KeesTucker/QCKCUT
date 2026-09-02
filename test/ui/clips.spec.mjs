@@ -166,3 +166,103 @@ test('there is no add button in the Clips panel', async ({ app }) => {
   await expect(app.page.locator('#addClip')).toHaveCount(0);
   await expect(app.page.locator('#clipList')).toBeEmpty();
 });
+
+// A sequence item made from a clip stays linked to it: retrimming the clip
+// retrims the item, so the timeline shows the clip you have rather than the one
+// you had when you dragged it on.
+test('retrimming a clip retrims the sequence item made from it', async ({ app }) => {
+  await app.add('land');
+  const clip = await app.page.evaluate(() => {
+    window.S.in = 1;
+    window.S.out = 2;
+    return window.addClip();
+  });
+  await app.page.evaluate((id) => window.addToSequence('clip', id, 0), clip.id);
+  expect((await app.state()).sequenceDuration).toBeCloseTo(1, 2);
+
+  await app.page.evaluate((id) => window.setClipRange(id, 1, 4), clip.id);
+
+  const s = await app.state();
+  expect(s.timeline[0].duration).toBeCloseTo(3, 2);
+  expect(s.timeline[0].out).toBeCloseTo(4, 2);
+  expect(s.sequenceDuration).toBeCloseTo(3, 2);
+});
+
+test('retrimming ripples the items after it', async ({ app }) => {
+  await app.add('land');
+  const first = await app.page.evaluate(() => {
+    window.S.in = 0; window.S.out = 1; return window.addClip();
+  });
+  const second = await app.page.evaluate(() => {
+    window.S.in = 2; window.S.out = 3; return window.addClip();
+  });
+  await app.page.evaluate((id) => window.addToSequence('clip', id, 0), first.id);
+  await app.page.evaluate((id) => window.addToSequence('clip', id, 1), second.id);
+  expect((await app.state()).timeline[1].start).toBeCloseTo(1, 2);
+
+  await app.page.evaluate((id) => window.setClipRange(id, 0, 2.5), first.id);
+
+  const s = await app.state();
+  expect(s.timeline[1].start).toBeCloseTo(2.5, 2);
+  expect(s.sequenceDuration).toBeCloseTo(3.5, 2);
+});
+
+test('marking in and out on a selected clip carries to the sequence', async ({ app }) => {
+  await app.add('land');
+  const clip = await app.page.evaluate(() => {
+    window.S.in = 1; window.S.out = 2; return window.addClip();
+  });
+  await app.page.evaluate((id) => window.addToSequence('clip', id, 0), clip.id);
+
+  await app.page.evaluate(() => { window.S.playhead = 4; });
+  await app.page.locator('#markOut').click();
+
+  await expect.poll(async () => (await app.state()).timeline[0].out).toBeCloseTo(4, 1);
+});
+
+test('an item dragged straight from a source is not linked to any clip', async ({ app }) => {
+  await app.add('land');
+  const clip = await app.page.evaluate(() => {
+    window.S.in = 1; window.S.out = 2; return window.addClip();
+  });
+  const sourceId = (await app.state()).sources[0].id;
+  await app.page.evaluate((id) => window.addToSequence('source', id, 0), sourceId);
+
+  await app.page.evaluate((id) => window.setClipRange(id, 0, 5), clip.id);
+
+  // The whole source is still the whole source.
+  const s = await app.state();
+  expect(s.timeline[0].in).toBe(0);
+  expect(s.timeline[0].out).toBeCloseTo(6, 1);
+});
+
+test('deleting the clip leaves its sequence item working', async ({ app }) => {
+  await app.add('land');
+  const clip = await app.page.evaluate(() => {
+    window.S.in = 1; window.S.out = 3; return window.addClip();
+  });
+  await app.page.evaluate((id) => window.addToSequence('clip', id, 0), clip.id);
+
+  await app.page.evaluate((id) => window.removeClip(id), clip.id);
+
+  const s = await app.state();
+  expect(s.clips).toHaveLength(0);
+  // The item holds its own range, so losing the clip costs it nothing.
+  expect(s.timeline[0].in).toBeCloseTo(1, 2);
+  expect(s.timeline[0].out).toBeCloseTo(3, 2);
+});
+
+test('the link survives a reload', async ({ app }) => {
+  await app.add('land');
+  const clip = await app.page.evaluate(() => {
+    window.S.in = 1; window.S.out = 2; return window.addClip();
+  });
+  await app.page.evaluate((id) => window.addToSequence('clip', id, 0), clip.id);
+
+  await app.page.reload();
+  await app.page.waitForFunction(() => window.S?.project);
+  await expect.poll(async () => (await app.state()).timeline.length, { timeout: 20_000 }).toBe(1);
+
+  await app.page.evaluate(() => window.setClipRange(window.S.clips[0].id, 1, 3.5));
+  await expect.poll(async () => (await app.state()).timeline[0].out).toBeCloseTo(3.5, 2);
+});

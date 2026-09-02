@@ -87,6 +87,10 @@ const warnTitle = $('warnTitle');
 const warnMsg = $('warnMsg');
 const controls = $('controls');
 const hintEl = $('hint');
+const menuEl = $('menu');
+const exportBar = $('exportBar');
+const exportFill = $('exportFill');
+const exportLabel = $('exportLabel');
 const musicGainWrap = $('musicGainWrap');
 const musicGain = $('musicGain');
 const musicName = $('musicName');
@@ -688,6 +692,25 @@ function field(label, commit) {
 }
 
 /**
+ * Carry a clip's range through to every sequence item made from it, so the
+ * timeline shows the clip you actually have rather than the one you had when
+ * you dragged it on. Only the range: an item's label is its own, because the
+ * same footage often wants a different name where it sits.
+ *
+ * Items dragged straight from a source have no clipId and are never touched.
+ */
+async function syncItemsFromClip(clip) {
+  const linked = S.timeline.filter((item) => item.clipId === clip.id);
+  if (!linked.length) return false;
+  for (const item of linked) {
+    item.in = clip.in;
+    item.out = clip.out;
+  }
+  await store.putTimeline(S.timeline);
+  return true;
+}
+
+/**
  * Set one or both ends of a clip. Pass null to leave an end alone. The range is
  * clamped into the source, so a typo cannot produce an inverted or out-of-range
  * clip.
@@ -715,6 +738,8 @@ export async function setClipRange(id, start, end) {
   updateUI();
 
   await store.putClip(clip);
+  await syncItemsFromClip(clip);
+  updateUI();
   if (mirrored) await seek(S.playhead);
   return clip;
 }
@@ -830,11 +855,17 @@ function updateUI() {
 
   // Export follows the sequence, not the view: see exportShowing().
   const hasSequence = S.timeline.length > 0;
-  exportBtn.textContent = hasSequence ? 'Export sequence' : 'Export clip';
-  exportBtn.title = hasSequence
-    ? 'Render the whole sequence'
-    : 'Render the marked range. Put something on the sequence to render that instead.';
-  exportBtn.disabled = S.exporting || (hasSequence ? false : !loaded);
+  if (S.exporting) {
+    exportBtn.textContent = 'Cancel';
+    exportBtn.title = 'Stop the render';
+    exportBtn.disabled = false;   // the one control that must stay live
+  } else {
+    exportBtn.textContent = hasSequence ? 'Export sequence' : 'Export clip';
+    exportBtn.title = hasSequence
+      ? 'Render the whole sequence'
+      : 'Render the marked range. Put something on the sequence to render that instead.';
+    exportBtn.disabled = hasSequence ? false : !loaded;
+  }
   renderSources();
   renderClips();
   renderTrack();
@@ -1058,7 +1089,8 @@ async function syncActiveClip() {
   clip.in = S.in;
   clip.out = S.out;
   await store.putClip(clip);
-  renderClips();
+  if (await syncItemsFromClip(clip)) updateUI();
+  else renderClips();
 }
 
 // ─── Sequence ────────────────────────────────────────────────────────────────
@@ -1151,7 +1183,15 @@ function itemFrom(kind, id) {
   if (kind === 'clip') {
     const clip = S.clips.find((c) => c.id === id);
     if (!clip) return null;
-    return { id: mintId('t'), sourceId: clip.sourceId, in: clip.in, out: clip.out, label: clip.label };
+    // clipId links the item back, so retrimming the clip retrims the item.
+    return {
+      id: mintId('t'),
+      clipId: clip.id,
+      sourceId: clip.sourceId,
+      in: clip.in,
+      out: clip.out,
+      label: clip.label,
+    };
   }
   const source = sourceById(id);
   if (!source) return null;
@@ -1391,7 +1431,9 @@ export async function playSequence() {
         for await (const sample of entry.sink.samples(from, row.item.out)) {
           try {
             if (!S.playingSeq) break;
-            const at = row.start + (sample.timestamp - row.item.in);
+            // Clamped for the same reason as in render.js: the frame holding
+            // the in point can start before it.
+            const at = clamp(row.start + (sample.timestamp - row.item.in), row.start, row.end);
             const wait = ((at - origin - elapsed()) / rate) * 1000;
             if (wait < -50 && painted) continue;
             if (wait > 0) await sleep(wait);
@@ -1431,22 +1473,30 @@ export async function exportSequence() {
   S.exporting = true;
   stopSequence();
   pause();
-  exportBtn.disabled = true;
+  const run = new AbortController();
+  exportRun = run;
+  // Set before the first await: audio is mixed before any picture is touched,
+  // which on a long sequence is seconds with nothing to show for it.
+  setBusy(true, 'Mixing audio… 0%');
 
   try {
     const rows = sequenceRows();
     const started = performance.now();
     const blob = await render.renderSequence(rows, (item) => sourceById(item.sourceId),
-      (p) => setStatus(`rendering sequence ${Math.round(p * 100)}%`), S.music,
-      outputShape(rows), S.settings.fps);
+      showProgress, S.music, outputShape(rows), S.settings.fps, run.signal);
     const took = (performance.now() - started) / 1000;
     render.download(blob, 'sequence.mp4');
     const total = rows[rows.length - 1].end;
     setStatus(`rendered ${(blob.size / 1e6).toFixed(1)} MB in ${took.toFixed(1)}s (${(total / took).toFixed(1)}\u00d7)`);
     return blob;
+  } catch (error) {
+    if (error?.name !== 'Cancelled') throw error;
+    warn('Render cancelled', 'Nothing was saved.');
+    return null;
   } finally {
+    exportRun = null;
     S.exporting = false;
-    updateUI();
+    setBusy(false);
   }
 }
 
@@ -1731,6 +1781,11 @@ addSourceBtn.addEventListener('click', () => pickFiles());
 
 document.addEventListener('keydown', (event) => {
   if (event.target.tagName === 'INPUT') return;
+  if (S.exporting) {
+    // Everything else is inert while rendering, but stopping stays reachable.
+    if (event.key === 'Escape') cancelExport();
+    return;
+  }
   if (event.key === '?') { event.preventDefault(); return openHelp(); }
   if (event.key === 'm') return setMuted(!S.muted);
   if (event.key === 'Escape') {
@@ -1760,23 +1815,32 @@ export async function exportRange() {
   S.exporting = true;
   pause();
   stopSequence();
-  exportBtn.disabled = true;
+  const run = new AbortController();
+  exportRun = run;
+  setBusy(true, 'Rendering… 0%');
 
   try {
     const started = performance.now();
     const blob = await render.renderClip(source, S.in, S.out,
-      (p) => setStatus(`exporting ${Math.round(p * 100)}%`), S.settings);
+      showProgress, S.settings, run.signal);
     const took = (performance.now() - started) / 1000;
     render.download(blob, exportName(source, S.clips.find((c) => c.id === S.activeClipId)));
     setStatus(`exported ${(blob.size / 1e6).toFixed(1)} MB in ${took.toFixed(1)}s (${((S.out - S.in) / took).toFixed(1)}\u00d7)`);
     return blob;
+  } catch (error) {
+    if (error?.name !== 'Cancelled') throw error;
+    warn('Render cancelled', 'Nothing was saved.');
+    return null;
   } finally {
+    exportRun = null;
     S.exporting = false;
-    updateUI();
+    setBusy(false);
   }
 }
 
-exportBtn.addEventListener('click', () => exportShowing().catch(fail));
+// exportShowing() returns a promise when starting and a boolean when
+// cancelling, so the result is normalised rather than assumed thenable.
+exportBtn.addEventListener('click', () => { Promise.resolve(exportShowing()).catch(fail); });
 
 /** Append the current in/out of the active source straight to the sequence. */
 export async function appendRange() {
@@ -1931,6 +1995,48 @@ function requireSource() {
   return false;
 }
 
+// While a render runs the header becomes the progress bar and the export button
+// becomes its stop. Everything below is inert: an edit made mid-render would
+// apply to a project the render has already read past, so the file would not
+// match what the screen said.
+let exportRun = null;
+
+// Audio is mixed before any picture is touched, so the two phases share one
+// bar: the mix takes the first quarter. Two bars, or one that restarts, would
+// both suggest the work went backwards.
+const AUDIO_SHARE = 0.25;
+
+function showProgress(fraction, phase) {
+  const done = phase === 'audio'
+    ? fraction * AUDIO_SHARE
+    : AUDIO_SHARE + fraction * (1 - AUDIO_SHARE);
+  const percent = Math.round(done * 100);
+  exportFill.style.width = `${percent}%`;
+  exportBar.setAttribute('aria-valuenow', String(percent));
+  exportLabel.textContent = phase === 'audio'
+    ? `Mixing audio… ${Math.round(fraction * 100)}%`
+    : `Rendering… ${Math.round(fraction * 100)}%`;
+}
+
+function setBusy(busy, label = '') {
+  if (busy) clearWarning();
+  document.body.classList.toggle('busy', busy);
+  menuEl.hidden = busy;
+  exportBar.hidden = !busy;
+  if (busy) {
+    exportFill.style.width = '0%';
+    exportLabel.textContent = label;
+  }
+  updateUI();
+}
+
+export function cancelExport() {
+  if (!exportRun) return false;
+  exportRun.abort();
+  exportLabel.textContent = 'Cancelling…';
+  return true;
+}
+
 /**
  * The sequence is the deliverable. Once anything is on it, that is what export
  * renders, whichever of the two the viewer happens to be showing: exporting a
@@ -1939,6 +2045,7 @@ function requireSource() {
  * to the marked range.
  */
 export function exportShowing() {
+  if (S.exporting) return cancelExport();
   return S.timeline.length ? exportSequence() : exportRange();
 }
 
@@ -2293,12 +2400,13 @@ export async function boot() {
 Object.assign(window, {
   S, media, store, snapshot, restore,
   seek, play, pause, addSource, setActive, removeSource,
-  addClip, markClip, beginMark, cancelMark, selectClip, removeClip,
+  addClip, markClip, beginMark, cancelMark, selectClip, removeClip, syncItemsFromClip,
   renameSource, renameClip, renameItem, exportRange, buildStrip, queueStrip, drawStrip, stripsIdle,
   sequence, render, addToSequence, removeFromSequence, moveInSequence, selectItem,
   appendRange, playSequence, stopSequence, exportSequence, sequenceShape,
   setView, seekSequence, togglePlay, seqTimeForX, exportShowing, warn, clearWarning,
   boot, openProject, newProject, renameProject, dropProject, setSettings, outputShape,
+  cancelExport,
   refreshPreview,
   audio, setMusic, setMusicFromSource, removeMusic, setMusicGain, setMuted, setRate,
   timecode, parseTimecode, clamp, clipLabel, exportName, setClipRange,

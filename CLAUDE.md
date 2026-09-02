@@ -19,7 +19,7 @@ Package manager is **pnpm** (pinned in `packageManager`).
 ```bash
 pnpm install
 pnpm dev              # Vite on http://localhost:5173
-pnpm test             # the gate: 190 Playwright tests in real Chrome
+pnpm test             # the gate: 207 Playwright tests in real Chrome
 pnpm build            # production bundle into dist/
 pnpm preview          # serve that bundle
 pnpm test:report      # open the HTML report
@@ -267,6 +267,32 @@ playback that started it.
 item audio. A bed at zero *gain* is genuinely left out of the mix; a muted app
 is not.
 
+### Timestamps clamp into the item's own span
+
+`sink.samples(in, out)` yields the frame *containing* `in`, which can start
+before it, and the frame *spanning* `out`. Unclamped, the first gives a negative
+timestamp on the opening item and the muxer refuses it outright
+("timestamp must be a non-negative number"); the second runs each item past its
+boundary. Both ends are clamped in `render.js` and in sequence playback.
+
+Fixture in-points sat on frame boundaries, so only real footage hit the first
+one. Off-boundary in-points are now in the suite.
+
+### Export can be cancelled, and says what it is doing
+
+`renderClip`/`renderSequence` take an `AbortSignal` and throw `render.Cancelled`,
+which callers tell apart from a real failure. A started `Output` holds an
+encoder, so a cancel has to `output.cancel()` rather than just stop looping.
+
+Audio is mixed **before any picture is touched**, so on a long sequence that is
+seconds with nothing on screen. Both phases report through one bar, the mix
+taking its first quarter; a bar that restarts per phase reads as work being
+redone. The first label is set before the first `await`.
+
+While a render runs the header becomes the bar, the export button becomes
+Cancel, and everything below is inert: an edit made halfway through would apply
+to a project the render has already read past.
+
 ### Sequence export must not drift
 
 `sink.samples(in, out)` also yields the frame that *spans* `out`. Letting its
@@ -449,7 +475,14 @@ or a modal because there is no new surface to position, dismiss or keyboard-trap
 and a custom context menu has to fight the browser's own.
 
 Renaming a clip does not touch a sequence item made from it, and vice versa:
-each is its own reference.
+each label is its own, because the same footage often wants a different name
+where it sits.
+
+The **range** is the opposite: an item made from a clip keeps that clip's id and
+follows its trims, so the timeline shows the clip you have rather than the one
+you had when you dragged it on. Items dragged straight from a source have no
+`clipId` and are never touched, and deleting a clip costs its items nothing
+because they hold their own range.
 
 ## Marking a clip
 
