@@ -366,6 +366,50 @@ class MediaEngine {
     }, onProgress: onProgress);
   }
 
+  // ─── Playback ────────────────────────────────────────────────────────────
+  //
+  // The audio feed lives on the worker, because decoding is the slow half and
+  // must not touch the UI isolate. The *clock* is read straight from the UI
+  // isolate instead: it is a handful of arithmetic on a value the audio thread
+  // already maintains, and routing it through a message per video frame would
+  // add more latency than it measures. Pointers are process wide, so the
+  // address the worker returns is usable from here.
+
+  Pointer<QkPlayer> _player = nullptr;
+  QkBindings? _direct;
+
+  /// True once the audio device has opened. Playback is silent without it, and
+  /// the picture then has no clock to follow, so the UI says so.
+  bool get canPlay => _player != nullptr;
+
+  /// Begin playing [items] from [from] on the sequence clock.
+  Future<void> play(List<SequenceItem> items, double from) async {
+    final address = await _send('play', {
+      'items': [for (final item in items) item.toMap()],
+      'from': from,
+    }) as int;
+    _player = Pointer<QkPlayer>.fromAddress(address);
+    _direct ??= QkBindings(DynamicLibrary.open(_libraryPath()));
+  }
+
+  Future<void> stopPlayback() async {
+    await _send('stopPlayback', const {});
+    _player = nullptr;
+  }
+
+  Future<void> pausePlayback(bool paused) =>
+      _send('pausePlayback', {'paused': paused});
+
+  /// Where playback has actually got to, in sequence seconds.
+  ///
+  /// This is the master clock. Video is paced against it rather than against a
+  /// timer, because the sound card runs on its own crystal and the two drift.
+  double get position {
+    final player = _player;
+    if (player == nullptr || _direct == null) return 0;
+    return _direct!.playerClock(player);
+  }
+
   /// Ask a running export to stop. It ends with a [Cancelled].
   void cancel() => _commands.send(_Request(0, 'cancel', const {}));
 }
@@ -396,6 +440,7 @@ void _workerMain(SendPort ready) {
 
   final sources = <int, Pointer<QkSource>>{};
   var nextHandle = 1;
+  _Playback? playback;
 
   String lastError() => bindings.lastError().toDartString();
 
@@ -522,6 +567,23 @@ void _workerMain(SendPort ready) {
 
         case 'exportSequence':
           unawaited(_runSequence(bindings, engine, ready, request, lastError));
+
+        case 'play':
+          playback?.stop();
+          playback = _Playback(bindings, engine,
+              (request.args['items']! as List).cast<Map<String, Object?>>());
+          final started = playback!.start(request.args['from']! as double);
+          if (started == 0) return fail(lastError(), QkStatus.errOpen);
+          reply(started);
+
+        case 'stopPlayback':
+          playback?.stop();
+          playback = null;
+          reply(null);
+
+        case 'pausePlayback':
+          playback?.pause(request.args['paused']! as bool);
+          reply(null);
 
         default:
           fail('unknown request ${request.op}');
@@ -717,5 +779,148 @@ Future<void> _runSequence(QkBindings bindings, Pointer<QkEngine> engine, SendPor
     calloc.free(outPath);
     calloc.free(settings);
     calloc.free(slot);
+  }
+}
+
+// ─── Playback, on the worker ─────────────────────────────────────────────────
+
+/// Feeds the audio device ahead of the clock.
+///
+/// Items on a sequence do not overlap, which is the whole reason this is simple:
+/// at any instant exactly one item is sounding, so playback needs no mixer. It
+/// walks the sequence clock forward, reads the covering item's audio, and tops
+/// the device up. If the sequence ever gained a cross dissolve that would stop
+/// being true, which is one more reason the original left it out.
+class _Playback {
+  _Playback(this._bindings, this._engine, this._items);
+
+  final QkBindings _bindings;
+  final Pointer<QkEngine> _engine;
+  final List<Map<String, Object?>> _items;
+
+  Pointer<QkPlayer> _player = nullptr;
+  Timer? _timer;
+
+  /// How far along the sequence clock the audio has been filled to. Distinct
+  /// from where playback has *got* to, which the device's own clock reports.
+  double _filled = 0;
+
+  final _open = <String, Pointer<QkSource>>{};
+
+  /// Kept a little ahead of the clock. Too little and a slow decode gaps the
+  /// sound; too much and a seek has more to throw away than it needs to.
+  static const double _target = 0.75;
+  static const double _chunk = 0.15;
+
+  /// Returns the player's address, or 0 when there is no audio device.
+  int start(double from) {
+    _player = _bindings.playerCreate();
+    if (_player == nullptr) return 0;
+    _filled = from;
+    _bindings.playerFlush(_player, from);
+    _timer = Timer.periodic(const Duration(milliseconds: 40), (_) => _fill());
+    _fill();
+    return _player.address;
+  }
+
+  double get _total {
+    var total = 0.0;
+    for (final item in _items) {
+      total += (item['outPoint']! as double) - (item['inPoint']! as double);
+    }
+    return total;
+  }
+
+  /// Which item covers a sequence time, and where that falls in its source.
+  (Map<String, Object?>, double)? _at(double time) {
+    var start = 0.0;
+    for (final item in _items) {
+      final duration = (item['outPoint']! as double) - (item['inPoint']! as double);
+      if (time >= start && time < start + duration) {
+        return (item, (item['inPoint']! as double) + (time - start));
+      }
+      start += duration;
+    }
+    return null;
+  }
+
+  void _fill() {
+    if (_player == nullptr) return;
+    final total = _total;
+
+    // Top up until far enough ahead, or until the sequence runs out.
+    while (_filled < total) {
+      final queued = _bindings.playerQueued(_player) / 48000.0;
+      if (queued >= _target) break;
+
+      final found = _at(_filled);
+      if (found == null) break;
+      final (item, sourceAt) = found;
+
+      final path = item['path']! as String;
+      final source = _sourceFor(path);
+      final frames = (_chunk * 48000).round();
+      final buffer = calloc<Float>(frames * 2);
+      try {
+        var got = 0;
+        if (source != nullptr && (item['muted']! as int) == 0) {
+          got = _bindings.sourceAudio(source, sourceAt, sourceAt + _chunk, buffer, frames);
+        }
+        // A silent or unreadable stretch still has to occupy its time, or the
+        // picture would run ahead of the sound by however much was skipped.
+        if (got <= 0) {
+          for (var i = 0; i < frames * 2; i++) {
+            buffer[i] = 0;
+          }
+          got = frames;
+        } else {
+          final gain = item['gain']! as double;
+          if (gain != 1.0) {
+            for (var i = 0; i < got * 2; i++) {
+              buffer[i] = buffer[i] * gain;
+            }
+          }
+        }
+
+        final taken = _bindings.playerWrite(_player, buffer, got);
+        if (taken <= 0) break;  // the device is full; try again on the next tick
+        _filled += taken / 48000.0;
+      } finally {
+        calloc.free(buffer);
+      }
+    }
+  }
+
+  Pointer<QkSource> _sourceFor(String path) {
+    // Playback opens its own decoders rather than borrowing the warm ones the
+    // preview is scrubbing with: two readers seeking the same decoder in
+    // opposite directions would fight, and scrubbing is what would lose.
+    final existing = _open[path];
+    if (existing != null) return existing;
+    final utf8Path = path.toNativeUtf8();
+    try {
+      final source = _bindings.sourceOpen(_engine, utf8Path);
+      _open[path] = source;
+      return source;
+    } finally {
+      calloc.free(utf8Path);
+    }
+  }
+
+  void pause(bool paused) {
+    if (_player != nullptr) _bindings.playerPause(_player, paused ? 1 : 0);
+  }
+
+  void stop() {
+    _timer?.cancel();
+    _timer = null;
+    if (_player != nullptr) {
+      _bindings.playerDestroy(_player);
+      _player = nullptr;
+    }
+    for (final source in _open.values) {
+      if (source != nullptr) _bindings.sourceClose(source);
+    }
+    _open.clear();
   }
 }

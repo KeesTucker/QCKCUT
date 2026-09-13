@@ -18,15 +18,18 @@ pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
   libavfilter
 )
 
+pkg_check_modules(PULSE REQUIRED IMPORTED_TARGET libpulse-simple)
+
 add_library(qckcut_engine SHARED
   src/engine.cpp
   src/source.cpp
   src/export.cpp
   src/sequence.cpp
+  src/player.cpp
 )
 
 target_include_directories(qckcut_engine PUBLIC include)
-target_link_libraries(qckcut_engine PRIVATE PkgConfig::FFMPEG)
+target_link_libraries(qckcut_engine PRIVATE PkgConfig::FFMPEG PkgConfig::PULSE)
 
 # Warnings on: this code hands raw buffers to Dart, so the compiler's opinion is
 # worth having.
@@ -40,4 +43,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 
   add_executable(qk_seq test/seq.cpp)
   target_link_libraries(qk_seq PRIVATE qckcut_engine)
+
+  add_executable(qk_play test/play.cpp)
+  target_link_libraries(qk_play PRIVATE qckcut_engine)
 endif()

@@ -198,4 +198,48 @@ void main() {
       );
     });
   }, skip: !_haveFfmpeg);
+
+  group('playback', () {
+    // Muted deliberately. The clock, the ring buffer and the latency correction
+    // all behave identically on silence, and a test suite that beeps at whoever
+    // runs it is a test suite people stop running.
+    test('the audio clock advances and does not run past the sequence', () async {
+      if (!engine.canPlay) return;  // no audio device, e.g. in CI
+
+      await engine.play([
+        SequenceItem(path: fixture, inPoint: 0, outPoint: 2, muted: true),
+      ], 0);
+
+      final samples = <double>[];
+      for (var i = 0; i < 12; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        samples.add(engine.position);
+      }
+      await engine.stopPlayback();
+
+      // It must move.
+      expect(samples.last, greaterThan(0.3),
+          reason: 'the clock never advanced: $samples');
+      // It must never go backwards, or the picture would jump back with it.
+      for (var i = 1; i < samples.length; i++) {
+        expect(samples[i], greaterThanOrEqualTo(samples[i - 1] - 1e-6));
+      }
+      // And it must not outrun what was queued.
+      expect(samples.last, lessThan(2.5));
+    });
+
+    test('starting from an offset starts the clock there', () async {
+      if (!engine.canPlay) return;
+
+      await engine.play([
+        SequenceItem(path: fixture, inPoint: 0, outPoint: 4, muted: true),
+      ], 1.5);
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+      final at = engine.position;
+      await engine.stopPlayback();
+
+      expect(at, greaterThanOrEqualTo(1.5));
+      expect(at, lessThan(2.2));
+    });
+  }, skip: !_haveFfmpeg);
 }

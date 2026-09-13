@@ -14,6 +14,7 @@ import 'package:flutter/foundation.dart';
 import '../core/sequence.dart' as seq;
 import '../core/transitions.dart' as transitions;
 import '../engine/engine.dart';
+import 'store.dart';
 
 /// One imported file, with its decoder kept warm.
 class Source {
@@ -52,9 +53,19 @@ class _Snapshot {
 }
 
 class Project extends ChangeNotifier {
-  Project(this.engine);
+  Project(this.engine, {ProjectStore? store, String? id, this.name = 'Untitled'})
+      : store = store ?? ProjectStore(),
+        id = id ?? 'p${DateTime.now().microsecondsSinceEpoch}';
 
   final MediaEngine engine;
+  final ProjectStore store;
+  final String id;
+  String name;
+
+  /// Sources whose file has gone missing since the project was saved. A path is
+  /// stable but not guaranteed, which is the one thing the browser original did
+  /// not have to worry about, so it is surfaced rather than swallowed.
+  final List<StoredSource> missing = [];
 
   final List<Source> sources = [];
   List<seq.Item> items = [];
@@ -104,6 +115,90 @@ class Project extends ChangeNotifier {
 
   var _nextId = 0;
   String _id(String prefix) => '$prefix${_nextId++}';
+
+  // ─── Persistence ───────────────────────────────────────────────────────────
+
+  Timer? _saveTimer;
+
+  /// Saving is debounced rather than immediate: dragging an item fires a change
+  /// per frame, and writing the project file on each would turn a smooth drag
+  /// into a stutter for no benefit.
+  void _scheduleSave() {
+    _saveTimer?.cancel();
+    _saveTimer = Timer(const Duration(milliseconds: 600), () => unawaited(save()));
+  }
+
+  Future<void> save() async {
+    _saveTimer?.cancel();
+    await store.save(StoredProject(
+      id: id,
+      name: name,
+      updatedAt: DateTime.now(),
+      sources: [
+        for (final source in sources)
+          StoredSource(
+            id: source.id,
+            path: source.path,
+            duration: source.info.duration,
+            width: source.info.width,
+            height: source.info.height,
+            hasVideo: source.info.hasVideo,
+            hasAudio: source.info.hasAudio,
+            videoCodec: source.info.videoCodec,
+          ),
+        // A source whose file is missing stays in the project rather than being
+        // dropped: the items referring to it are still meaningful, and putting
+        // the file back should be enough to recover.
+        ...missing,
+      ],
+      items: items,
+      intro: intro,
+      outro: outro,
+    ));
+  }
+
+  /// Reopen a saved project. Sources are reopened by path; the ones that will
+  /// not open are collected in [missing] rather than failing the whole load,
+  /// because one moved file should not cost you the edit.
+  static Future<Project> open(MediaEngine engine, StoredProject stored,
+      {ProjectStore? store}) async {
+    final project =
+        Project(engine, store: store, id: stored.id, name: stored.name);
+
+    for (final saved in stored.sources) {
+      try {
+        final handle = await engine.open(saved.path);
+        final info = await engine.info(handle);
+        final source =
+            Source(id: saved.id, path: saved.path, handle: handle, info: info);
+        project.sources.add(source);
+        if (source.hasVideo) unawaited(project._loadTiles(source));
+      } catch (_) {
+        project.missing.add(saved);
+      }
+    }
+
+    project.items = stored.items;
+    project.intro = stored.intro;
+    project.outro = stored.outro;
+    project.selectedSourceId =
+        project.sources.isEmpty ? null : project.sources.first.id;
+
+    // Ids are handed out from a counter, so it has to start past anything the
+    // saved project already used or a new item would collide with an old one.
+    var highest = 0;
+    for (final id in [
+      ...stored.sources.map((s) => s.id),
+      ...stored.items.map((i) => i.id),
+    ]) {
+      final digits = RegExp(r'\d+').firstMatch(id)?.group(0);
+      final value = digits == null ? 0 : int.tryParse(digits) ?? 0;
+      if (value > highest) highest = value;
+    }
+    project._nextId = highest + 1;
+
+    return project;
+  }
 
   // ─── Sources ───────────────────────────────────────────────────────────────
 
@@ -262,7 +357,14 @@ class Project extends ChangeNotifier {
       ];
 
   @override
+  void notifyListeners() {
+    super.notifyListeners();
+    _scheduleSave();
+  }
+
+  @override
   void dispose() {
+    _saveTimer?.cancel();
     for (final source in sources) {
       for (final tile in source.tiles) {
         tile.dispose();

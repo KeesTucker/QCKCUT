@@ -18,6 +18,8 @@ final class QkEngine extends Opaque {}
 
 final class QkSource extends Opaque {}
 
+final class QkPlayer extends Opaque {}
+
 // ─── Structs ─────────────────────────────────────────────────────────────────
 
 final class QkSourceInfo extends Struct {
@@ -198,6 +200,30 @@ class QkBindings {
           Pointer<QkOutputSettings>, double, double,
           Pointer<NativeFunction<QkProgressCallback>>,
           Pointer<Void>)>('qk_export_sequence');
+
+  // ─── Playback ──────────────────────────────────────────────────────────────
+
+  late final playerCreate = _lib.lookupFunction<Pointer<QkPlayer> Function(),
+      Pointer<QkPlayer> Function()>('qk_player_create');
+
+  late final playerDestroy = _lib.lookupFunction<Void Function(Pointer<QkPlayer>),
+      void Function(Pointer<QkPlayer>)>('qk_player_destroy');
+
+  late final playerWrite = _lib.lookupFunction<
+      Int32 Function(Pointer<QkPlayer>, Pointer<Float>, Int32),
+      int Function(Pointer<QkPlayer>, Pointer<Float>, int)>('qk_player_write');
+
+  late final playerClock = _lib.lookupFunction<Double Function(Pointer<QkPlayer>),
+      double Function(Pointer<QkPlayer>)>('qk_player_clock');
+
+  late final playerQueued = _lib.lookupFunction<Int32 Function(Pointer<QkPlayer>),
+      int Function(Pointer<QkPlayer>)>('qk_player_queued');
+
+  late final playerFlush = _lib.lookupFunction<Void Function(Pointer<QkPlayer>, Double),
+      void Function(Pointer<QkPlayer>, double)>('qk_player_flush');
+
+  late final playerPause = _lib.lookupFunction<Void Function(Pointer<QkPlayer>, Int32),
+      void Function(Pointer<QkPlayer>, int)>('qk_player_pause');
 
   late final cancel = _lib.lookupFunction<Void Function(Pointer<QkEngine>),
       void Function(Pointer<QkEngine>)>('qk_cancel');

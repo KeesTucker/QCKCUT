@@ -215,6 +215,43 @@ QK_EXPORT QkStatus qk_export_clip(QkEngine* engine, const char* in_path,
                                   const QkOutputSettings* settings,
                                   QkProgressFn progress, void* user);
 
+// ─── Playback ────────────────────────────────────────────────────────────────
+// The important idea here is the clock.
+//
+// Video paced against a wall clock is fine on its own but drifts against audio,
+// because the sound card runs on its own crystal and does not agree with the
+// system timer about how long a second is. So once sound is playing the audio
+// clock is the master and the picture is paced against it. That is what keeps
+// the two from separating over a long sequence, and it is the reason this
+// player exists at all rather than a timer in Dart.
+//
+// The player owns a thread and a ring buffer. Writes are non-blocking: the
+// caller tops the buffer up ahead of the clock and is told how much was taken,
+// rather than being blocked inside the audio device.
+
+typedef struct QkPlayer QkPlayer;
+
+/** Open the audio device. Returns null if there is none; see `qk_last_error`. */
+QK_EXPORT QkPlayer* qk_player_create(void);
+QK_EXPORT void qk_player_destroy(QkPlayer* player);
+
+/**
+ * Queue interleaved stereo float at 48 kHz. Returns the number of frames
+ * actually taken, which is less than asked for when the buffer is full.
+ */
+QK_EXPORT int32_t qk_player_write(QkPlayer* player, const float* frames, int32_t count);
+
+/** Seconds of sound actually heard, accounting for what is still in the device. */
+QK_EXPORT double qk_player_clock(QkPlayer* player);
+
+/** Frames queued but not yet played, so the caller knows how far ahead it is. */
+QK_EXPORT int32_t qk_player_queued(QkPlayer* player);
+
+/** Drop everything queued and reset the clock to `at`. For a seek. */
+QK_EXPORT void qk_player_flush(QkPlayer* player, double at);
+
+QK_EXPORT void qk_player_pause(QkPlayer* player, int32_t paused);
+
 // ─── Sequences ───────────────────────────────────────────────────────────────
 // A single clip can be remuxed. A sequence cannot: its items come from
 // different sources, with different codecs, resolutions and rotations, so every

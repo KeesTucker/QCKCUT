@@ -2,33 +2,48 @@
 //
 // The browser original ran everything through WebCodecs. Here the same work is
 // done by FFmpeg with NVDEC and NVENC behind `lib/engine`, and this file is the
-// shell around it: open a file, scrub it, mark a range, export it.
+// shell around it: start the engine, reopen the last project, hand both to the
+// editor.
 
 import 'package:flutter/material.dart';
 
 import 'engine/engine.dart';
+import 'state/project.dart';
+import 'state/store.dart';
 import 'ui/editor.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // The engine is started before the first frame so the UI can say what this
+  // The engine starts before the first frame so the UI can say what this
   // machine can actually do rather than guessing and correcting itself later.
   MediaEngine? engine;
+  Project? project;
   Object? failure;
+
   try {
     engine = await MediaEngine.start();
+
+    // The most recently touched project, or a new one. Opening the last thing
+    // you were working on is what every editor does, and the alternative is an
+    // empty window that makes you go and find it.
+    final store = ProjectStore();
+    final saved = store.list();
+    project = saved.isEmpty
+        ? Project(engine, store: store)
+        : await Project.open(engine, saved.first, store: store);
   } catch (error) {
     failure = error;
   }
 
-  runApp(QckcutApp(engine: engine, failure: failure));
+  runApp(QckcutApp(engine: engine, project: project, failure: failure));
 }
 
 class QckcutApp extends StatelessWidget {
-  const QckcutApp({super.key, this.engine, this.failure});
+  const QckcutApp({super.key, this.engine, this.project, this.failure});
 
   final MediaEngine? engine;
+  final Project? project;
   final Object? failure;
 
   @override
@@ -46,8 +61,8 @@ class QckcutApp extends StatelessWidget {
         useMaterial3: true,
         scaffoldBackgroundColor: const Color(0xFF121316),
       ),
-      home: engine != null
-          ? EditorPage(engine: engine!)
+      home: engine != null && project != null
+          ? EditorPage(engine: engine!, project: project!)
           : EngineFailure(error: failure),
     );
   }

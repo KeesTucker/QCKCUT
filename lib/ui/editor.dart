@@ -9,6 +9,7 @@ import 'dart:ui' as ui;
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 
 import '../core/sequence.dart' as seq;
@@ -19,16 +20,20 @@ import '../state/project.dart';
 import 'timeline.dart';
 
 class EditorPage extends StatefulWidget {
-  const EditorPage({super.key, required this.engine});
+  const EditorPage({super.key, required this.engine, required this.project});
 
   final MediaEngine engine;
+
+  /// Made by the caller rather than here, because opening a saved project is
+  /// asynchronous and a widget cannot wait for it before its first build.
+  final Project project;
 
   @override
   State<EditorPage> createState() => _EditorPageState();
 }
 
-class _EditorPageState extends State<EditorPage> {
-  late final Project _project = Project(widget.engine);
+class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateMixin {
+  Project get _project => widget.project;
 
   ui.Image? _preview;
   double _playhead = 0;      // within the selected source
@@ -48,6 +53,13 @@ class _EditorPageState extends State<EditorPage> {
   static const int _previewWidth = 1024;
   static const int _previewHeight = 576;
 
+  /// Playback. The ticker only decides *when* to ask for a frame; *which*
+  /// frame comes from the engine's audio clock, never from the ticker's own
+  /// elapsed time, because the sound card and the system timer disagree about
+  /// how long a second is and the picture would slide against the sound.
+  Ticker? _ticker;
+  bool _playing = false;
+
   /// Scrubbing fires far faster than a decode completes, so a request in flight
   /// means the next one waits and only the newest is served. Without this the
   /// decoder ends up a second behind the pointer and never catches up.
@@ -58,12 +70,25 @@ class _EditorPageState extends State<EditorPage> {
   void initState() {
     super.initState();
     _project.addListener(_onProjectChanged);
+    if (_project.missing.isNotEmpty) {
+      final names = _project.missing.map((s) => s.name).join(', ');
+      _error = 'Could not reopen: $names. '
+          'The project remembers paths, so putting the files back is enough.';
+    }
+    final first = _project.sources.isEmpty ? null : _project.sources.first;
+    if (first != null && first.hasVideo) {
+      _outPoint = first.info.duration;
+      unawaited(_showSourceFrame(first, 0));
+    }
   }
 
   @override
   void dispose() {
+    _ticker?.dispose();
+    unawaited(widget.engine.stopPlayback());
     _project.removeListener(_onProjectChanged);
-    _project.dispose();
+    // Owned by the caller, which made it; disposing it here would tear down a
+    // project the app may still be about to save.
     _preview?.dispose();
     super.dispose();
   }
@@ -146,6 +171,47 @@ class _EditorPageState extends State<EditorPage> {
     await _decode(source.handle, seq.sourceTime(row, at));
   }
 
+  // ─── Playback ──────────────────────────────────────────────────────────────
+
+  Future<void> _togglePlay() async {
+    if (_playing) {
+      await _stopPlayback();
+      return;
+    }
+    if (_project.items.isEmpty) return;
+
+    final from = (_sequenceAt ?? 0) >= _project.duration ? 0.0 : (_sequenceAt ?? 0);
+    setState(() { _playing = true; _sequenceAt = from; _error = null; });
+
+    try {
+      await widget.engine.play(_project.renderItems, from);
+    } catch (error) {
+      setState(() { _playing = false; _error = '$error'; });
+      return;
+    }
+
+    _ticker ??= createTicker(_onTick);
+    _ticker!.start();
+  }
+
+  Future<void> _stopPlayback() async {
+    _ticker?.stop();
+    setState(() => _playing = false);
+    await widget.engine.stopPlayback();
+  }
+
+  void _onTick(Duration _) {
+    if (!_playing) return;
+    // The audio clock is the master. The ticker is only what wakes us up.
+    final at = widget.engine.position;
+    if (at >= _project.duration) {
+      unawaited(_stopPlayback());
+      return;
+    }
+    setState(() => _sequenceAt = at);
+    unawaited(_showSequenceFrame(at));
+  }
+
   // ─── Export ────────────────────────────────────────────────────────────────
 
   Future<void> _exportSequence() async {
@@ -193,6 +259,7 @@ class _EditorPageState extends State<EditorPage> {
             _RedoIntent(),
         SingleActivator(LogicalKeyboardKey.keyI): _MarkInIntent(),
         SingleActivator(LogicalKeyboardKey.keyO): _MarkOutIntent(),
+        SingleActivator(LogicalKeyboardKey.space): _PlayIntent(),
       },
       child: Actions(
         actions: {
@@ -202,6 +269,8 @@ class _EditorPageState extends State<EditorPage> {
               onInvoke: (_) => setState(() => _inPoint = _playhead)),
           _MarkOutIntent: CallbackAction<_MarkOutIntent>(
               onInvoke: (_) => setState(() => _outPoint = _playhead)),
+          _PlayIntent: CallbackAction<_PlayIntent>(
+              onInvoke: (_) => unawaited(_togglePlay())),
         },
         child: Focus(
           autofocus: true,
@@ -235,6 +304,9 @@ class _EditorPageState extends State<EditorPage> {
                   project: _project,
                   playhead: _sequenceAt ?? 0,
                   onScrub: (at) {
+                    // Scrubbing while playing would have two things driving the
+                    // playhead, so playback gives way to the hand on the strip.
+                    if (_playing) unawaited(_stopPlayback());
                     setState(() => _sequenceAt = at);
                     unawaited(_showSequenceFrame(at));
                   },
@@ -288,8 +360,16 @@ class _EditorPageState extends State<EditorPage> {
               label: const Text('Import'),
             ),
             const SizedBox(width: 8),
-            FilledButton.icon(
+            IconButton.filled(
+              tooltip: _playing ? 'Stop' : 'Play the sequence',
               onPressed: _project.items.isEmpty || _progress != null
+                  ? null
+                  : () => unawaited(_togglePlay()),
+              icon: Icon(_playing ? Icons.stop : Icons.play_arrow, size: 18),
+            ),
+            const SizedBox(width: 8),
+            FilledButton.icon(
+              onPressed: _project.items.isEmpty || _progress != null || _playing
                   ? null
                   : _exportSequence,
               icon: const Icon(Icons.movie_creation_outlined, size: 18),
@@ -434,6 +514,7 @@ class _EditorPageState extends State<EditorPage> {
   }
 }
 
+class _PlayIntent extends Intent { const _PlayIntent(); }
 class _UndoIntent extends Intent { const _UndoIntent(); }
 class _RedoIntent extends Intent { const _RedoIntent(); }
 class _MarkInIntent extends Intent { const _MarkInIntent(); }
