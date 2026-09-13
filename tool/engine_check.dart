@@ -25,7 +25,7 @@ Future<void> main(List<String> args) async {
   final handle = await engine.open(args.first);
   final info = await engine.info(handle);
   print('');
-  print('${args.first}');
+  print(args.first);
   print('  ${info.duration.toStringAsFixed(3)}s  ${info.width}x${info.height}  '
       '${info.videoCodec}  ${info.hardwareDecoded ? "NVDEC" : "software"}');
   if (info.hasAudio) {
