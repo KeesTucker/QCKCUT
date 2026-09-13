@@ -57,11 +57,19 @@ class SourceInfo {
 
 /// A decoded picture: RGBA at the size that was asked for.
 class DecodedFrame {
-  const DecodedFrame(this.pixels, this.width, this.height, this.timestamp);
+  const DecodedFrame(
+      this.pixels, this.width, this.height, this.timestamp, this.hardwareDecoded);
+
   final Uint8List pixels;
   final int width;
   final int height;
   final double timestamp;
+
+  /// Whether NVDEC carried this frame. Reported here rather than on
+  /// [SourceInfo] because the answer is not known at open time: FFmpeg falls
+  /// back to software silently, so the only proof is a frame arriving on a CUDA
+  /// surface, which has not happened yet when a file is first opened.
+  final bool hardwareDecoded;
 }
 
 /// What the export should produce. Nulls mean "match the source", which is the
@@ -247,7 +255,8 @@ class MediaEngine {
       'width': width,
       'height': height,
     }) as Map<String, Object?>;
-    return DecodedFrame(map['pixels']! as Uint8List, width, height, timestamp);
+    return DecodedFrame(map['pixels']! as Uint8List, width, height, timestamp,
+        map['hardwareDecoded']! as bool);
   }
 
   /// Filmstrip tiles: keyframes only, never a delta frame decoded to fill one.
@@ -385,10 +394,22 @@ void _workerMain(SendPort ready) {
             final status = bindings.sourceFrameAt(
                 source, request.args['timestamp']! as double, buffer, width, height);
             if (status != QkStatus.ok) return fail(lastError(), status);
+            // Asked after the decode, not before: that is the only point at
+            // which the hardware question has a true answer.
+            final probe = calloc<QkSourceInfo>();
+            var hardware = false;
+            try {
+              if (bindings.sourceInfo(source, probe) == QkStatus.ok) {
+                hardware = probe.ref.hwDecoded != 0;
+              }
+            } finally {
+              calloc.free(probe);
+            }
             // Copied out of native memory before the buffer is freed; the list
             // then travels to the UI isolate by value.
             reply({
               'pixels': Uint8List.fromList(buffer.asTypedList(width * height * 4)),
+              'hardwareDecoded': hardware,
             });
           } finally {
             calloc.free(buffer);

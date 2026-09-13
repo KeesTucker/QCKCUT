@@ -5,6 +5,7 @@
 
 import 'dart:io';
 
+import 'package:qckcut/engine/bindings.dart' show QkCodec;
 import 'package:qckcut/engine/engine.dart';
 
 Future<void> main(List<String> args) async {
@@ -29,7 +30,8 @@ Future<void> main(List<String> args) async {
   }
 
   final frame = await engine.frameAt(handle, info.duration / 2, 320, 180);
-  print('  frame at midpoint: ${frame.pixels.length} bytes RGBA');
+  print('  frame at midpoint: ${frame.pixels.length} bytes RGBA  '
+      '(${frame.hardwareDecoded ? "NVDEC" : "software"})');
 
   final (tiles, tileWidth) = await engine.thumbnails(handle, 6);
   print('  ${tiles.length} tiles at ${tileWidth}x88');
@@ -42,6 +44,7 @@ Future<void> main(List<String> args) async {
       outputPath: out,
       start: 0.5,
       end: 2.5,
+      settings: const OutputSettings(codec: QkCodec.hevc),
       onProgress: seen.add,
     );
     final size = File(out).lengthSync();

@@ -20,7 +20,7 @@ static void on_progress(double fraction, int32_t phase, void* user) {
 
 int main(int argc, char** argv) {
   if (argc < 3) {
-    fprintf(stderr, "usage: qk_smoke <input> <output.mp4>\n");
+    fprintf(stderr, "usage: qk_smoke <input> <output.mp4> [start] [end]\n");
     return 2;
   }
 
@@ -78,6 +78,12 @@ int main(int argc, char** argv) {
         fclose(ppm);
         printf("  frame at %.3fs -> /tmp/qk_frame.ppm\n", at);
       }
+      // Asked again now that a frame has actually been decoded: the hardware
+      // claim is deliberately not made until one has come back on a CUDA
+      // surface, so before this point it is always false.
+      QkSourceInfo after;
+      qk_source_info(source, &after);
+      printf("  decode path: %s\n", after.hw_decoded ? "NVDEC" : "software");
     }
 
     // Thumbnails, the filmstrip path.
@@ -101,8 +107,11 @@ int main(int argc, char** argv) {
 
   // Export a range. Asking for a different codec forces the NVENC path rather
   // than the remux shortcut, which is the half worth proving.
-  const double start = 0.5;
-  const double end = start + 2.0 < info.duration ? start + 2.0 : info.duration;
+  // Range defaults to two seconds in from the half second mark, but can be
+  // given so the same binary doubles as a benchmark on a long file.
+  const double start = argc > 3 ? atof(argv[3]) : 0.5;
+  const double requested = argc > 4 ? atof(argv[4]) : start + 2.0;
+  const double end = requested < info.duration ? requested : info.duration;
 
   QkOutputSettings settings = {};
   settings.codec = QK_CODEC_HEVC;

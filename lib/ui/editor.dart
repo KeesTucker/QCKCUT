@@ -34,6 +34,10 @@ class _EditorPageState extends State<EditorPage> {
   double _outPoint = 0;
 
   List<ui.Image> _tiles = const [];
+
+  /// Only known once a frame has been decoded, so it is tracked separately from
+  /// the [SourceInfo] fetched at open time.
+  bool _hardwareDecoded = false;
   String? _error;
   bool _busy = false;
 
@@ -92,6 +96,7 @@ class _EditorPageState extends State<EditorPage> {
         _handle = handle;
         _path = file.path;
         _info = info;
+        _hardwareDecoded = false;
         _playhead = 0;
         _inPoint = 0;
         _outPoint = info.duration;
@@ -143,6 +148,7 @@ class _EditorPageState extends State<EditorPage> {
       setState(() {
         _preview?.dispose();
         _preview = image;
+        _hardwareDecoded = frame.hardwareDecoded;
       });
     } catch (error) {
       if (mounted) setState(() => _error = '$error');
@@ -259,7 +265,8 @@ class _EditorPageState extends State<EditorPage> {
                 if (_inPoint >= _outPoint) _inPoint = 0;
               }),
             ),
-          if (info != null) _StatusBar(info: info, path: _path),
+          if (info != null)
+            _StatusBar(info: info, path: _path, hardwareDecoded: _hardwareDecoded),
         ],
       ),
     );
@@ -435,9 +442,10 @@ class _Scrubber extends StatelessWidget {
 }
 
 class _StatusBar extends StatelessWidget {
-  const _StatusBar({required this.info, this.path});
+  const _StatusBar({required this.info, this.path, required this.hardwareDecoded});
   final SourceInfo info;
   final String? path;
+  final bool hardwareDecoded;
 
   @override
   Widget build(BuildContext context) {
@@ -447,7 +455,7 @@ class _StatusBar extends StatelessWidget {
       if (info.videoCodec != null) info.videoCodec!,
       if (info.rotation != 0) 'rotated ${info.rotation}',
       if (info.hasAudio) '${info.audioCodec} ${info.sampleRate}Hz ${info.channels}ch',
-      info.hardwareDecoded ? 'NVDEC' : 'software decode',
+      hardwareDecoded ? 'NVDEC' : 'software decode',
     ];
     return Container(
       width: double.infinity,
