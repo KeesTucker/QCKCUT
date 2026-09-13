@@ -15,12 +15,14 @@ pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
   libavutil
   libswscale
   libswresample
+  libavfilter
 )
 
 add_library(qckcut_engine SHARED
   src/engine.cpp
   src/source.cpp
   src/export.cpp
+  src/sequence.cpp
 )
 
 target_include_directories(qckcut_engine PUBLIC include)
@@ -35,4 +37,7 @@ target_compile_options(qckcut_engine PRIVATE -Wall -Wextra -Wno-unused-parameter
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(qk_smoke test/smoke.cpp)
   target_link_libraries(qk_smoke PRIVATE qckcut_engine)
+
+  add_executable(qk_seq test/seq.cpp)
+  target_link_libraries(qk_seq PRIVATE qckcut_engine)
 endif()

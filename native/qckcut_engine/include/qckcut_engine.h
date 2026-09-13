@@ -215,6 +215,55 @@ QK_EXPORT QkStatus qk_export_clip(QkEngine* engine, const char* in_path,
                                   const QkOutputSettings* settings,
                                   QkProgressFn progress, void* user);
 
+// ─── Sequences ───────────────────────────────────────────────────────────────
+// A single clip can be remuxed. A sequence cannot: its items come from
+// different sources, with different codecs, resolutions and rotations, so every
+// frame is drawn into one output-sized picture and re-encoded. The decode and
+// the encode both stay on the GPU; only the compositing step comes down, and
+// that is where the next optimisation is.
+//
+// Position is the item's index, not a stored start time. The engine lays them
+// out end to end exactly as `sequence.dart` does, so the two cannot disagree
+// about where a cut falls.
+
+typedef struct {
+  const char* path;     // the source file this item comes from
+  double in_point;      // seconds into the source
+  double out_point;
+
+  int32_t rotate;       // 0/90/180/270, applied before the crop
+
+  // Framing. `has_frame` of 0 means the item is left exactly as shot and the
+  // project's own fit is used instead.
+  int32_t has_frame;
+  double zoom;
+  double frame_x;       // centre, in fractions of the source
+  double frame_y;
+
+  // Sound. A muted item still occupies its time, so the picture stays in sync.
+  double gain;
+  int32_t muted;
+
+  // The dip to black at this item's *start*, in seconds. Half is taken from the
+  // outgoing side and half from the incoming one, so the sequence keeps its
+  // length. Zero for a hard cut.
+  double dip_duration;
+} QkSequenceItem;
+
+/**
+ * Render a laid-out sequence to one file.
+ *
+ * `intro_fade` and `outro_fade` fade the very start and very end, in seconds.
+ * Progress is reported for both phases: audio is mixed before any picture is
+ * touched, and on a long sequence that is many seconds with nothing to show for
+ * it, so the phase is reported rather than left to look like a hang.
+ */
+QK_EXPORT QkStatus qk_export_sequence(QkEngine* engine, const QkSequenceItem* items,
+                                      int32_t count, const char* out_path,
+                                      const QkOutputSettings* settings,
+                                      double intro_fade, double outro_fade,
+                                      QkProgressFn progress, void* user);
+
 /** Ask a running export to stop. It ends with QK_ERR_CANCELLED. */
 QK_EXPORT void qk_cancel(QkEngine* engine);
 QK_EXPORT void qk_uncancel(QkEngine* engine);
