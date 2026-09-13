@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <string>
+#include <vector>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -62,6 +63,7 @@ struct QkSource {
   int scaler_w = 0, scaler_h = 0;     // what the scaler is currently set up for
   AVPixelFormat scaler_in = AV_PIX_FMT_NONE;
   int rotation = 0;
+  std::vector<uint8_t> turn;          // scratch for rotating, kept to avoid churn
 
   // Audio
   int audio_index = -1;

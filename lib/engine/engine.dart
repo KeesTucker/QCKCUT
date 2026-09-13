@@ -164,11 +164,17 @@ class EngineException implements Exception {
 }
 
 /// Where the shared library sits, in a built bundle and when running from source.
+///
+/// Order matters, and it has caught us once. An installed app must load the
+/// copy beside its executable, so that is checked first. But `flutter test`
+/// runs from the project root, where the *bundle* copy is found before the
+/// standalone `build/engine` one. Rebuilding only the standalone library and
+/// then running the tests therefore tests the previous build, silently and
+/// convincingly. Run `flutter build linux` after touching native code.
 String _libraryPath() {
   const name = 'libqckcut_engine.so';
   final beside = File(p.join(p.dirname(Platform.resolvedExecutable), 'lib', name));
   if (beside.existsSync()) return beside.path;
-  // `flutter run` leaves it in the CMake output rather than the bundle.
   for (final mode in ['debug', 'release', 'profile']) {
     final built = File(p.join(Directory.current.path, 'build', 'linux', 'x64', mode,
         'bundle', 'lib', name));

@@ -11,6 +11,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 
+import '../core/output.dart';
 import '../core/sequence.dart' as seq;
 import '../core/transitions.dart' as transitions;
 import '../engine/engine.dart';
@@ -72,6 +73,9 @@ class Project extends ChangeNotifier {
 
   seq.Transition? intro;
   seq.Transition? outro;
+
+  OutputShape output = const OutputShape();
+  int codec = 0;  // QkCodec.h264
 
   String? selectedSourceId;
   String? selectedItemId;
@@ -154,6 +158,8 @@ class Project extends ChangeNotifier {
       items: items,
       intro: intro,
       outro: outro,
+      output: output,
+      codec: codec,
     ));
   }
 
@@ -181,6 +187,8 @@ class Project extends ChangeNotifier {
     project.items = stored.items;
     project.intro = stored.intro;
     project.outro = stored.outro;
+    project.output = stored.output;
+    project.codec = stored.codec;
     project.selectedSourceId =
         project.sources.isEmpty ? null : project.sources.first.id;
 
@@ -303,10 +311,53 @@ class Project extends ChangeNotifier {
     notifyListeners();
   }
 
+  void setOutput(OutputShape value) {
+    _remember('Output settings');
+    output = value;
+    notifyListeners();
+  }
+
+  void setCodec(int value) {
+    _remember('Output codec');
+    codec = value;
+    notifyListeners();
+  }
+
   void setOutro(seq.Transition? value) {
     _remember('Sequence end');
     outro = value;
     notifyListeners();
+  }
+
+  /// The shape framing is expressed against.
+  ///
+  /// A crop always matches the output's aspect, so this is what every item's
+  /// framing is relative to. When the output is set to match the source, the
+  /// first item that has pictures decides, which is the same rule the engine
+  /// applies when it renders.
+  ({double width, double height})? get outputShape {
+    if (output.width != null && output.height != null) {
+      return (width: output.width!.toDouble(), height: output.height!.toDouble());
+    }
+    for (final item in items) {
+      final source = sourceOf(item);
+      if (source != null && source.hasVideo) {
+        final turned = item.rotate == 90 || item.rotate == 270;
+        final width = turned ? source.info.height : source.info.width;
+        final height = turned ? source.info.width : source.info.height;
+        if (width > 0 && height > 0) {
+          return (width: width.toDouble(), height: height.toDouble());
+        }
+      }
+    }
+    final source = selectedSource;
+    if (source != null && source.hasVideo && source.info.height > 0) {
+      return (
+        width: source.info.width.toDouble(),
+        height: source.info.height.toDouble()
+      );
+    }
+    return null;
   }
 
   transitions.Plan get plan => transitions.plan(rows, intro: intro, outro: outro);

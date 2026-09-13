@@ -5,6 +5,7 @@
 // original was built around, and it is deliberately the same one here.
 
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:file_selector/file_selector.dart';
@@ -12,11 +13,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 
+import '../core/frame.dart';
+import '../core/output.dart';
 import '../core/sequence.dart' as seq;
 import '../core/transitions.dart' as transitions;
-import '../engine/bindings.dart' show QkCodec;
 import '../engine/engine.dart';
 import '../state/project.dart';
+import 'framing.dart';
+import 'settings_dialog.dart';
 import 'timeline.dart';
 
 class EditorPage extends StatefulWidget {
@@ -44,14 +48,20 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
   /// rather than the source, because that is what the playhead means there.
   double? _sequenceAt;
 
+  /// Framing is a mode rather than always-on: dragging the preview has to mean
+  /// one thing, and the rest of the time it should not move the picture.
+  bool _framing = false;
+
   String? _error;
   bool _busy = false;
   double? _progress;
   String _phase = '';
   bool _hardware = false;
 
-  static const int _previewWidth = 1024;
-  static const int _previewHeight = 576;
+  /// Roughly how many pixels across to decode a preview at. The exact size is
+  /// the source's own aspect, because the framing overlay crops this image and
+  /// letterbox bars baked into it would be cropped along with the picture.
+  static const int _previewAcross = 1024;
 
   /// Playback. The ticker only decides *when* to ask for a frame; *which*
   /// frame comes from the engine's audio clock, never from the ticker's own
@@ -135,6 +145,18 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
   Future<void> _showSourceFrame(Source source, double at) =>
       _decode(source.handle, at);
 
+  /// The decode size for a source: its own shape, so nothing is padded.
+  (int, int) _previewSize(Source source) {
+    final width = source.info.width;
+    final height = source.info.height;
+    if (width <= 0 || height <= 0) return (_previewAcross, _previewAcross * 9 ~/ 16);
+    final scale = _previewAcross / width;
+    return (
+      math.max(2, (width * scale).round() & ~1),
+      math.max(2, (height * scale).round() & ~1),
+    );
+  }
+
   Future<void> _decode(int handle, double at) async {
     if (_decoding) {
       _queued = (handle: handle, at: at);
@@ -142,8 +164,13 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
     }
     _decoding = true;
     try {
-      final frame = await widget.engine
-          .frameAt(handle, at, _previewWidth, _previewHeight);
+      Source? owner;
+      for (final source in _project.sources) {
+        if (source.handle == handle) owner = source;
+      }
+      final (width, height) =
+          owner == null ? (_previewAcross, 576) : _previewSize(owner);
+      final frame = await widget.engine.frameAt(handle, at, width, height);
       final image = await _toImage(frame.pixels, frame.width, frame.height);
       if (!mounted) { image.dispose(); return; }
       setState(() {
@@ -169,6 +196,20 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
     final source = _project.sourceOf(row.item);
     if (source == null || !source.hasVideo) return;
     await _decode(source.handle, seq.sourceTime(row, at));
+  }
+
+  Future<void> _openSettings() async {
+    final result = await showDialog<(OutputShape, int)>(
+      context: context,
+      builder: (context) => OutputSettingsDialog(
+        shape: _project.output,
+        codec: _project.codec,
+        engine: widget.engine,
+      ),
+    );
+    if (result == null) return;
+    _project.setOutput(result.$1);
+    _project.setCodec(result.$2);
   }
 
   // ─── Playback ──────────────────────────────────────────────────────────────
@@ -227,7 +268,13 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
       await widget.engine.exportSequence(
         items: _project.renderItems,
         outputPath: target.path,
-        settings: const OutputSettings(codec: QkCodec.h264),
+        settings: OutputSettings(
+          width: _project.output.width,
+          height: _project.output.height,
+          fps: _project.output.fps,
+          codec: _project.codec,
+          fit: _project.output.fit.index,
+        ),
         introFade: _project.intro?.duration ?? 0,
         outroFade: _project.outro?.duration ?? 0,
         onProgress: (fraction) {
@@ -320,24 +367,90 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
     );
   }
 
+  /// The item the framing controls act on: whichever is selected on the strip.
+  seq.Item? get _selectedItem {
+    for (final item in _project.items) {
+      if (item.id == _project.selectedItemId) return item;
+    }
+    return null;
+  }
+
   Widget _previewArea(Source? source) {
-    return Container(
-      color: Colors.black,
-      alignment: Alignment.center,
-      child: _preview != null
-          ? FittedBox(
-              fit: BoxFit.contain,
-              child: SizedBox(
-                width: _preview!.width.toDouble(),
-                height: _preview!.height.toDouble(),
-                child: RawImage(image: _preview, filterQuality: FilterQuality.medium),
-              ),
-            )
-          : Text(
-              source == null
-                  ? 'Import a file to start'
-                  : 'No pictures in ${source.name}',
-              style: const TextStyle(color: Colors.white38)),
+    if (_preview == null) {
+      return Container(
+        color: Colors.black,
+        alignment: Alignment.center,
+        child: Text(
+            source == null
+                ? 'Import a file to start'
+                : 'No pictures in ${source.name}',
+            style: const TextStyle(color: Colors.white38)),
+      );
+    }
+
+    final shape = _project.outputShape;
+    final item = _selectedItem;
+
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: FramedPreview(
+            image: _preview,
+            outputAspect: shape == null ? 16 / 9 : shape.width / shape.height,
+            rotate: item?.rotate ?? 0,
+            framing: item?.frame,
+            fit: _project.output.fit,
+            framingMode: _framing && item != null,
+            onFramingChanged: item == null
+                ? null
+                : (framing) => _project.updateItem(
+                    item.id, (i) => i.copyWith(frame: framing), 'Reframe'),
+          ),
+        ),
+        if (_framing) Positioned(left: 12, top: 12, child: _framingControls(item)),
+      ],
+    );
+  }
+
+  Widget _framingControls(seq.Item? item) {
+    if (item == null) {
+      return const _Hint('Select an item on the strip to frame it');
+    }
+    final framing = item.frame ?? defaultFrame;
+    return Card(
+      color: const Color(0xE61B1D22),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Drag to move, scroll to zoom',
+                style: TextStyle(fontSize: 12, color: Colors.white70)),
+            const SizedBox(width: 16),
+            Text('${framing.zoom.toStringAsFixed(2)}x',
+                style: const TextStyle(fontSize: 12)),
+            const SizedBox(width: 8),
+            TextButton(
+              onPressed: isDefault(item.frame, item.rotate)
+                  ? null
+                  : () => _project.updateItem(
+                      item.id,
+                      (i) => seq.Item(
+                            id: i.id,
+                            sourceId: i.sourceId,
+                            inPoint: i.inPoint,
+                            outPoint: i.outPoint,
+                            rotate: 0,
+                            transition: i.transition,
+                            gain: i.gain,
+                            muted: i.muted,
+                          ),
+                      'Reset framing'),
+              child: const Text('Reset'),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -398,6 +511,19 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
             ],
 
             const Spacer(),
+            IconButton(
+              tooltip: _framing ? 'Done framing' : 'Frame the selected item',
+              isSelected: _framing,
+              selectedIcon: const Icon(Icons.crop, size: 18),
+              icon: const Icon(Icons.crop_free, size: 18),
+              onPressed: () => setState(() => _framing = !_framing),
+            ),
+            TextButton.icon(
+              icon: const Icon(Icons.aspect_ratio, size: 16),
+              label: Text(_project.output.label),
+              onPressed: _openSettings,
+            ),
+            const SizedBox(width: 8),
             _fadeToggle('Fade in', _project.intro, _project.setIntro),
             const SizedBox(width: 8),
             _fadeToggle('Fade out', _project.outro, _project.setOutro),
@@ -626,4 +752,19 @@ class _Chip extends StatelessWidget {
       child: Text(label, style: TextStyle(color: colour, fontSize: 12)),
     );
   }
+}
+
+class _Hint extends StatelessWidget {
+  const _Hint(this.text);
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => Card(
+        color: const Color(0xE61B1D22),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Text(text,
+              style: const TextStyle(fontSize: 12, color: Colors.white70)),
+        ),
+      );
 }

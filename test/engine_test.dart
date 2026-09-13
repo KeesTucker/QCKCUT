@@ -142,6 +142,74 @@ void main() {
     });
   }, skip: !_haveFfmpeg);
 
+  group('rotation', () {
+    // A file with a display matrix, made in two passes because -display_rotation
+    // is an input option: it is applied on the way in and written on the way out.
+    late String rotated;
+
+    setUpAll(() {
+      if (!_haveFfmpeg) return;
+      final flat = '${work.path}/flat.mp4';
+      rotated = '${work.path}/rotated.mp4';
+      Process.runSync('ffmpeg', [
+        '-y', '-hide_banner', '-loglevel', 'error',
+        '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30:duration=2',
+        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', flat,
+      ]);
+      Process.runSync('ffmpeg', [
+        '-y', '-hide_banner', '-loglevel', 'error',
+        '-display_rotation', '90', '-i', flat, '-c', 'copy', rotated,
+      ]);
+    });
+
+    test('reports the display shape, not the coded one', () async {
+      final handle = await engine.open(rotated);
+      final info = await engine.info(handle);
+      // Coded 640x360, but a player shows it portrait, and that is what the
+      // rest of the app lays out against.
+      expect(info.width, 360);
+      expect(info.height, 640);
+      expect(info.rotation, isNot(0));
+      await engine.close(handle);
+    });
+
+    // The contract is that `info` reports the display shape, so the pixels have
+    // to come back the same way up or anything shot on a phone previews on its
+    // side while the numbers claim otherwise. Checked against ffmpeg's own
+    // autorotation rather than against our own reasoning about sign conventions.
+    test('decodes the picture the same way up as ffmpeg does', () async {
+      final handle = await engine.open(rotated);
+      final frame = await engine.frameAt(handle, 1.0, 320, 180);
+      await engine.close(handle);
+
+      final mine = '${work.path}/mine.rgba';
+      File(mine).writeAsBytesSync(frame.pixels);
+
+      final reference = '${work.path}/reference.rgba';
+      final made = Process.runSync('ffmpeg', [
+        '-y', '-hide_banner', '-loglevel', 'error',
+        '-ss', '1', '-i', rotated, '-frames:v', '1',
+        '-vf', 'scale=320:180:force_original_aspect_ratio=decrease,'
+            'pad=320:180:(ow-iw)/2:(oh-ih)/2,format=rgba',
+        '-f', 'rawvideo', reference,
+      ]);
+      expect(made.exitCode, 0, reason: made.stderr as String);
+
+      final theirs = File(reference).readAsBytesSync();
+      expect(theirs, hasLength(frame.pixels.length));
+
+      // Mean absolute difference. Scalers differ, so this is never zero; a
+      // quarter or half turn out of place puts it an order of magnitude higher.
+      var total = 0;
+      for (var i = 0; i < theirs.length; i++) {
+        total += (frame.pixels[i] - theirs[i]).abs();
+      }
+      final difference = total / theirs.length;
+      expect(difference, lessThan(12),
+          reason: 'the picture does not match ffmpeg, difference $difference');
+    });
+  }, skip: !_haveFfmpeg);
+
   group('clip export', () {
     test('a plain trim keeps the source codec and the audio', () async {
       final out = '${work.path}/clip.mp4';

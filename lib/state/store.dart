@@ -21,6 +21,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../core/frame.dart';
+import '../core/output.dart';
 import '../core/sequence.dart' as seq;
 
 const int _formatVersion = 1;
@@ -93,6 +94,8 @@ class StoredProject {
     this.items = const [],
     this.intro,
     this.outro,
+    this.output = const OutputShape(),
+    this.codec = 0,
   });
 
   final String id;
@@ -102,6 +105,11 @@ class StoredProject {
   List<seq.Item> items;
   seq.Transition? intro;
   seq.Transition? outro;
+
+  /// What the project is being cut for. Stored per project, since it describes
+  /// that project's deliverable rather than a preference.
+  OutputShape output;
+  int codec;
 
   Map<String, Object?> toJson() => {
         'version': _formatVersion,
@@ -114,6 +122,13 @@ class StoredProject {
         'items': [for (final item in items) _itemToJson(item)],
         'intro': _transitionToJson(intro),
         'outro': _transitionToJson(outro),
+        'output': {
+          'width': output.width,
+          'height': output.height,
+          'fps': output.fps,
+          'fit': output.fit.name,
+        },
+        'codec': codec,
       };
 
   static StoredProject fromJson(Map<String, Object?> json) => StoredProject(
@@ -131,7 +146,22 @@ class StoredProject {
         ],
         intro: _transitionFromJson(json['intro']),
         outro: _transitionFromJson(json['outro']),
+        output: _outputFromJson(json['output']),
+        codec: (json['codec'] as num?)?.toInt() ?? 0,
       );
+}
+
+OutputShape _outputFromJson(Object? json) {
+  if (json is! Map) return const OutputShape();
+  return OutputShape(
+    width: (json['width'] as num?)?.toInt(),
+    height: (json['height'] as num?)?.toInt(),
+    fps: (json['fps'] as num?)?.toDouble(),
+    fit: Fit.values.firstWhere(
+      (fit) => fit.name == json['fit'],
+      orElse: () => Fit.contain,
+    ),
+  );
 }
 
 Map<String, Object?> _itemToJson(seq.Item item) => {

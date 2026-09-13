@@ -85,7 +85,35 @@ AVCodecContext* open_decoder(QkEngine* engine, AVStream* stream, bool want_hw, b
 }
 
 /**
- * Bring a decoded frame down to RGBA at the requested size, letterboxed.
+ * Copy `src` into `dst` turned by `rotate` degrees clockwise, both RGBA.
+ *
+ * swscale cannot rotate, and the container's display matrix has to be honoured
+ * somewhere: `qk_source_info` reports the *display* shape, so returning coded
+ * pixels would mean anything shot on a phone previewed on its side while the
+ * reported dimensions said otherwise. Doing it here keeps that contract in one
+ * place, at the cost of one pass over a preview-sized image.
+ */
+void rotate_rgba(const uint8_t* src, int src_w, int src_h, int src_stride,
+                 uint8_t* dst, int dst_stride, int rotate) {
+  for (int y = 0; y < src_h; y++) {
+    const uint32_t* in = reinterpret_cast<const uint32_t*>(src + static_cast<ptrdiff_t>(y) * src_stride);
+    for (int x = 0; x < src_w; x++) {
+      int nx, ny;
+      switch (rotate) {
+        case 90:  nx = src_h - 1 - y; ny = x;               break;
+        case 180: nx = src_w - 1 - x; ny = src_h - 1 - y;   break;
+        case 270: nx = y;             ny = src_w - 1 - x;   break;
+        default:  nx = x;             ny = y;               break;
+      }
+      auto* out = reinterpret_cast<uint32_t*>(dst + static_cast<ptrdiff_t>(ny) * dst_stride);
+      out[nx] = in[x];
+    }
+  }
+}
+
+/**
+ * Bring a decoded frame down to RGBA at the requested size, letterboxed and
+ * turned the right way up.
  *
  * A hardware frame lands in `AV_PIX_FMT_CUDA` and has to be transferred before
  * swscale can touch it. That copy is the one unavoidable cost of showing a
@@ -107,15 +135,26 @@ bool to_rgba(QkSource* src, AVFrame* decoded, uint8_t* out, int out_w, int out_h
   }
 
   auto in_fmt = static_cast<AVPixelFormat>(picture->format);
+  const int rotate = ((src->rotation % 360) + 360) % 360;
+  const bool turned = rotate == 90 || rotate == 270;
+
+  // The output box is in display space, so the picture's display shape is what
+  // has to fit into it. A quarter turn swaps the two.
+  const double display_w = turned ? picture->height : picture->width;
+  const double display_h = turned ? picture->width : picture->height;
 
   // The picture keeps its shape inside the output, which is the `contain` fit
   // the original letterboxed with. Anything not covered stays black.
-  const double scale = std::min(static_cast<double>(out_w) / picture->width,
-                                static_cast<double>(out_h) / picture->height);
-  int dst_w = std::max(2, static_cast<int>(std::lround(picture->width * scale)) & ~1);
-  int dst_h = std::max(2, static_cast<int>(std::lround(picture->height * scale)) & ~1);
-  dst_w = std::min(dst_w, out_w);
-  dst_h = std::min(dst_h, out_h);
+  const double scale = std::min(out_w / display_w, out_h / display_h);
+  int shown_w = std::max(2, static_cast<int>(std::lround(display_w * scale)) & ~1);
+  int shown_h = std::max(2, static_cast<int>(std::lround(display_h * scale)) & ~1);
+  shown_w = std::min(shown_w, out_w);
+  shown_h = std::min(shown_h, out_h);
+
+  // What swscale produces is pre-rotation, so its dimensions are the shown ones
+  // swapped back.
+  const int dst_w = turned ? shown_h : shown_w;
+  const int dst_h = turned ? shown_w : shown_h;
 
   if (!src->scaler || src->scaler_w != dst_w || src->scaler_h != dst_h ||
       src->scaler_in != in_fmt) {
@@ -129,17 +168,40 @@ bool to_rgba(QkSource* src, AVFrame* decoded, uint8_t* out, int out_w, int out_h
   }
   if (!src->scaler) return false;
 
-  std::memset(out, 0, static_cast<size_t>(out_w) * out_h * 4);
+  // Opaque black, not transparent black. Zeroing the whole buffer leaves the
+  // letterbox bars with an alpha of 0, which looks right over a black
+  // background and wrong over anything else, and is a difference that only
+  // shows up once someone composites the preview onto something.
+  {
+    auto* pixels = reinterpret_cast<uint32_t*>(out);
+    const uint32_t opaque_black = 0xFF000000u;  // R=0 G=0 B=0 A=255 in RGBA order
+    const size_t count = static_cast<size_t>(out_w) * out_h;
+    for (size_t i = 0; i < count; i++) pixels[i] = opaque_black;
+  }
 
-  // Scale straight into the middle of the caller's buffer by offsetting the
-  // destination pointer, rather than scaling to a scratch buffer and blitting.
-  const int x = (out_w - dst_w) / 2;
-  const int y = (out_h - dst_h) / 2;
-  uint8_t* dst_data[4] = {out + (static_cast<size_t>(y) * out_w + x) * 4, nullptr, nullptr, nullptr};
-  int dst_stride[4] = {out_w * 4, 0, 0, 0};
+  const int x = (out_w - shown_w) / 2;
+  const int y = (out_h - shown_h) / 2;
 
+  if (!turned && rotate == 0) {
+    // Scale straight into the middle of the caller's buffer by offsetting the
+    // destination pointer, rather than scaling to a scratch buffer and blitting.
+    uint8_t* dst_data[4] = {out + (static_cast<size_t>(y) * out_w + x) * 4, nullptr,
+                            nullptr, nullptr};
+    int dst_stride[4] = {out_w * 4, 0, 0, 0};
+    sws_scale(src->scaler, picture->data, picture->linesize, 0, picture->height,
+              dst_data, dst_stride);
+    return true;
+  }
+
+  // Turned: scale into a scratch buffer, then rotate into place.
+  src->turn.resize(static_cast<size_t>(dst_w) * dst_h * 4);
+  uint8_t* scratch[4] = {src->turn.data(), nullptr, nullptr, nullptr};
+  int scratch_stride[4] = {dst_w * 4, 0, 0, 0};
   sws_scale(src->scaler, picture->data, picture->linesize, 0, picture->height,
-            dst_data, dst_stride);
+            scratch, scratch_stride);
+
+  rotate_rgba(src->turn.data(), dst_w, dst_h, dst_w * 4,
+              out + (static_cast<size_t>(y) * out_w + x) * 4, out_w * 4, rotate);
   return true;
 }
 
