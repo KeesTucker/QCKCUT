@@ -20,6 +20,7 @@ import '../core/transitions.dart' as transitions;
 import '../engine/engine.dart';
 import '../state/project.dart';
 import 'framing.dart';
+import 'media_types.dart';
 import 'settings_dialog.dart';
 import 'timeline.dart';
 
@@ -115,11 +116,7 @@ class _EditorPageState extends State<EditorPage> with SingleTickerProviderStateM
   // ─── Import ────────────────────────────────────────────────────────────────
 
   Future<void> _import() async {
-    const group = XTypeGroup(label: 'media', extensions: [
-      'mp4', 'mov', 'mkv', 'webm', 'm4v', 'avi', 'mts', 'm2ts',
-      'mp3', 'wav', 'flac', 'm4a', 'aac', 'ogg',
-    ]);
-    final files = await openFiles(acceptedTypeGroups: const [group]);
+    final files = await openFiles(acceptedTypeGroups: importGroups());
     if (files.isEmpty) return;
 
     setState(() { _busy = true; _error = null; });
