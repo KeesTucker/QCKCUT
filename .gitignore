@@ -4,3 +4,11 @@ dist/
 test-results/
 playwright-report/
 test/media/
+
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+build/
+*.iml
+.packages
