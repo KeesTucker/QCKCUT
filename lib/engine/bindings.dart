@@ -43,6 +43,33 @@ final class QkSourceInfo extends Struct {
   external Pointer<Utf8> audioCodec;
 }
 
+/// One item on the sequence clock. Its position is its index in the array, not
+/// a stored start time, which is the same choice `core/sequence.dart` makes and
+/// for the same reason: there are no gaps to manage and no overlaps to resolve.
+final class QkSequenceItem extends Struct {
+  external Pointer<Utf8> path;
+  @Double()
+  external double inPoint;
+  @Double()
+  external double outPoint;
+  @Int32()
+  external int rotate;
+  @Int32()
+  external int hasFrame;
+  @Double()
+  external double zoom;
+  @Double()
+  external double frameX;
+  @Double()
+  external double frameY;
+  @Double()
+  external double gain;
+  @Int32()
+  external int muted;
+  @Double()
+  external double dipDuration;
+}
+
 final class QkOutputSettings extends Struct {
   @Int32()
   external int width;
@@ -162,6 +189,15 @@ class QkBindings {
       int Function(Pointer<QkEngine>, Pointer<Utf8>, Pointer<Utf8>, double, double,
           Pointer<QkOutputSettings>, Pointer<NativeFunction<QkProgressCallback>>,
           Pointer<Void>)>('qk_export_clip');
+
+  late final exportSequence = _lib.lookupFunction<
+      Int32 Function(Pointer<QkEngine>, Pointer<QkSequenceItem>, Int32, Pointer<Utf8>,
+          Pointer<QkOutputSettings>, Double, Double,
+          Pointer<NativeFunction<QkProgressCallback>>, Pointer<Void>),
+      int Function(Pointer<QkEngine>, Pointer<QkSequenceItem>, int, Pointer<Utf8>,
+          Pointer<QkOutputSettings>, double, double,
+          Pointer<NativeFunction<QkProgressCallback>>,
+          Pointer<Void>)>('qk_export_sequence');
 
   late final cancel = _lib.lookupFunction<Void Function(Pointer<QkEngine>),
       void Function(Pointer<QkEngine>)>('qk_cancel');

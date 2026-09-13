@@ -1,3 +1,6 @@
+// ignore_for_file: avoid_print — this is a command line tool; printing is what
+// it is for.
+
 // Exercises the Dart side of the engine without starting the UI, so the FFI
 // boundary can be checked on its own. Run it as:
 //
@@ -52,6 +55,29 @@ Future<void> main(List<String> args) async {
         '${seen.length} progress ticks');
   } catch (error) {
     print('  export failed: $error');
+  }
+
+  // The sequence path: three items, one turned, one dipped, fades at each end.
+  final seqOut = '${Directory.systemTemp.path}/qk_dart_sequence.mp4';
+  final ticks = <double>[];
+  try {
+    await engine.exportSequence(
+      items: [
+        SequenceItem(path: args.first, inPoint: 0.5, outPoint: 1.5),
+        SequenceItem(
+            path: args.first, inPoint: 2.0, outPoint: 3.0, rotate: 90, dipDuration: 0.4),
+        SequenceItem(path: args.first, inPoint: 3.5, outPoint: 4.5, zoom: 1.6),
+      ],
+      outputPath: seqOut,
+      introFade: 0.5,
+      outroFade: 0.5,
+      onProgress: ticks.add,
+    );
+    final size = File(seqOut).lengthSync();
+    print('  sequence: $seqOut (${(size / 1024).toStringAsFixed(0)} KB), '
+        '${ticks.length} progress ticks');
+  } catch (error) {
+    print('  sequence failed: $error');
   }
 
   await engine.close(handle);

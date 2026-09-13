@@ -1,18 +1,22 @@
-// The editor: one source, scrubbed, with a range marked on it and exported.
+// The editor.
 //
-// This is the vertical slice of the original's single-clip path. The sequence
-// model is already ported in `core/`, so what is missing here is the timeline
-// UI on top, not the thinking underneath it.
+// Import sources on the left, scrub the selected one in the middle, mark a
+// range and add it to the sequence along the bottom. That is the whole loop the
+// original was built around, and it is deliberately the same one here.
 
 import 'dart:async';
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
-import '../engine/bindings.dart' show QkCodec, qkThumbHeight;
+import '../core/sequence.dart' as seq;
+import '../core/transitions.dart' as transitions;
+import '../engine/bindings.dart' show QkCodec;
 import '../engine/engine.dart';
+import '../state/project.dart';
+import 'timeline.dart';
 
 class EditorPage extends StatefulWidget {
   const EditorPage({super.key, required this.engine});
@@ -24,88 +28,75 @@ class EditorPage extends StatefulWidget {
 }
 
 class _EditorPageState extends State<EditorPage> {
-  int? _handle;
-  String? _path;
-  SourceInfo? _info;
+  late final Project _project = Project(widget.engine);
 
   ui.Image? _preview;
-  double _playhead = 0;
+  double _playhead = 0;      // within the selected source
   double _inPoint = 0;
   double _outPoint = 0;
 
-  List<ui.Image> _tiles = const [];
+  /// When the timeline is being scrubbed the preview follows the sequence
+  /// rather than the source, because that is what the playhead means there.
+  double? _sequenceAt;
 
-  /// Only known once a frame has been decoded, so it is tracked separately from
-  /// the [SourceInfo] fetched at open time.
-  bool _hardwareDecoded = false;
   String? _error;
   bool _busy = false;
+  double? _progress;
+  String _phase = '';
+  bool _hardware = false;
 
-  double? _exportProgress;
+  static const int _previewWidth = 1024;
+  static const int _previewHeight = 576;
 
   /// Scrubbing fires far faster than a decode completes, so a request in flight
   /// means the next one waits and only the newest is served. Without this the
   /// decoder ends up a second behind the pointer and never catches up.
   bool _decoding = false;
-  double? _queued;
+  ({int handle, double at})? _queued;
 
-  static const int _previewWidth = 960;
-  static const int _previewHeight = 540;
+  @override
+  void initState() {
+    super.initState();
+    _project.addListener(_onProjectChanged);
+  }
 
   @override
   void dispose() {
-    final handle = _handle;
-    if (handle != null) widget.engine.close(handle);
+    _project.removeListener(_onProjectChanged);
+    _project.dispose();
     _preview?.dispose();
-    for (final tile in _tiles) {
-      tile.dispose();
-    }
     super.dispose();
   }
 
-  /// RGBA straight from the decoder into a texture, with no encode/decode
-  /// round trip through PNG in between.
-  Future<ui.Image> _decodeRgba(Uint8List pixels, int width, int height) {
+  void _onProjectChanged() => setState(() {});
+
+  Future<ui.Image> _toImage(Uint8List pixels, int width, int height) {
     final completer = Completer<ui.Image>();
     ui.decodeImageFromPixels(
         pixels, width, height, ui.PixelFormat.rgba8888, completer.complete);
     return completer.future;
   }
 
-  Future<void> _open() async {
-    const group = XTypeGroup(
-      label: 'video',
-      extensions: ['mp4', 'mov', 'mkv', 'webm', 'm4v', 'avi', 'mp3', 'wav', 'flac', 'm4a'],
-    );
-    final file = await openFile(acceptedTypeGroups: const [group]);
-    if (file == null) return;
+  // ─── Import ────────────────────────────────────────────────────────────────
 
-    setState(() {
-      _busy = true;
-      _error = null;
-    });
+  Future<void> _import() async {
+    const group = XTypeGroup(label: 'media', extensions: [
+      'mp4', 'mov', 'mkv', 'webm', 'm4v', 'avi', 'mts', 'm2ts',
+      'mp3', 'wav', 'flac', 'm4a', 'aac', 'ogg',
+    ]);
+    final files = await openFiles(acceptedTypeGroups: const [group]);
+    if (files.isEmpty) return;
 
+    setState(() { _busy = true; _error = null; });
     try {
-      final previous = _handle;
-      if (previous != null) await widget.engine.close(previous);
-
-      final handle = await widget.engine.open(file.path);
-      final info = await widget.engine.info(handle);
-
-      setState(() {
-        _handle = handle;
-        _path = file.path;
-        _info = info;
-        _hardwareDecoded = false;
-        _playhead = 0;
-        _inPoint = 0;
-        _outPoint = info.duration;
-        _tiles = const [];
-      });
-
-      if (info.hasVideo) {
-        await _showFrame(0);
-        unawaited(_loadThumbnails(handle));
+      for (final file in files) {
+        final source = await _project.import(file.path);
+        if (source.hasVideo) {
+          _inPoint = 0;
+          _outPoint = source.info.duration;
+          _playhead = 0;
+          await _showSourceFrame(source, 0);
+        }
       }
     } catch (error) {
       setState(() => _error = '$error');
@@ -114,41 +105,26 @@ class _EditorPageState extends State<EditorPage> {
     }
   }
 
-  Future<void> _loadThumbnails(int handle) async {
-    try {
-      final (tiles, tileWidth) = await widget.engine.thumbnails(handle, 12);
-      final images = <ui.Image>[];
-      for (final tile in tiles) {
-        images.add(await _decodeRgba(tile, tileWidth, qkThumbHeight));
-      }
-      if (!mounted) return;
-      setState(() => _tiles = images);
-    } catch (_) {
-      // A filmstrip that will not decode is not worth interrupting the edit for.
-    }
-  }
+  // ─── Preview ───────────────────────────────────────────────────────────────
 
-  /// Show the frame at [at], collapsing requests that arrive while one is out.
-  Future<void> _showFrame(double at) async {
-    final handle = _handle;
-    if (handle == null) return;
+  Future<void> _showSourceFrame(Source source, double at) =>
+      _decode(source.handle, at);
+
+  Future<void> _decode(int handle, double at) async {
     if (_decoding) {
-      _queued = at;
+      _queued = (handle: handle, at: at);
       return;
     }
     _decoding = true;
     try {
       final frame = await widget.engine
           .frameAt(handle, at, _previewWidth, _previewHeight);
-      final image = await _decodeRgba(frame.pixels, frame.width, frame.height);
-      if (!mounted) {
-        image.dispose();
-        return;
-      }
+      final image = await _toImage(frame.pixels, frame.width, frame.height);
+      if (!mounted) { image.dispose(); return; }
       setState(() {
         _preview?.dispose();
         _preview = image;
-        _hardwareDecoded = frame.hardwareDecoded;
+        _hardware = frame.hardwareDecoded;
       });
     } catch (error) {
       if (mounted) setState(() => _error = '$error');
@@ -156,145 +132,148 @@ class _EditorPageState extends State<EditorPage> {
       _decoding = false;
       final next = _queued;
       _queued = null;
-      if (next != null) unawaited(_showFrame(next));
+      if (next != null) unawaited(_decode(next.handle, next.at));
     }
   }
 
-  Future<void> _export() async {
-    final path = _path;
-    if (path == null || _outPoint <= _inPoint) return;
+  /// Show what the sequence looks like at [at]: the item covering that instant,
+  /// at the source time it maps to.
+  Future<void> _showSequenceFrame(double at) async {
+    final row = seq.at(_project.rows, at);
+    if (row == null) return;
+    final source = _project.sourceOf(row.item);
+    if (source == null || !source.hasVideo) return;
+    await _decode(source.handle, seq.sourceTime(row, at));
+  }
 
+  // ─── Export ────────────────────────────────────────────────────────────────
+
+  Future<void> _exportSequence() async {
+    if (_project.items.isEmpty) return;
     final target = await getSaveLocation(
-      suggestedName: 'cut.mp4',
+      suggestedName: 'sequence.mp4',
       acceptedTypeGroups: const [XTypeGroup(label: 'mp4', extensions: ['mp4'])],
     );
     if (target == null) return;
 
-    setState(() {
-      _exportProgress = 0;
-      _error = null;
-    });
-
+    setState(() { _progress = 0; _phase = 'audio'; _error = null; });
     try {
-      await widget.engine.exportClip(
-        inputPath: path,
+      await widget.engine.exportSequence(
+        items: _project.renderItems,
         outputPath: target.path,
-        start: _inPoint,
-        end: _outPoint,
         settings: const OutputSettings(codec: QkCodec.h264),
+        introFade: _project.intro?.duration ?? 0,
+        outroFade: _project.outro?.duration ?? 0,
         onProgress: (fraction) {
-          if (mounted) setState(() => _exportProgress = fraction);
+          if (mounted) setState(() => _progress = fraction);
         },
       );
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Wrote ${target.path}')),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Wrote ${target.path}')));
     } on Cancelled {
       if (mounted) setState(() => _error = 'Export cancelled');
     } catch (error) {
       if (mounted) setState(() => _error = '$error');
     } finally {
-      if (mounted) setState(() => _exportProgress = null);
+      if (mounted) setState(() => _progress = null);
     }
   }
 
+  // ─── Build ─────────────────────────────────────────────────────────────────
+
   @override
   Widget build(BuildContext context) {
-    final info = _info;
-    final theme = Theme.of(context);
+    final source = _project.selectedSource;
 
-    return Scaffold(
-      body: Column(
-        children: [
-          _Toolbar(
-            engine: widget.engine,
-            busy: _busy,
-            onOpen: _open,
-            onExport: info != null && _outPoint > _inPoint && _exportProgress == null
-                ? _export
-                : null,
-            onCancel: _exportProgress != null ? widget.engine.cancel : null,
-            progress: _exportProgress,
+    return Shortcuts(
+      shortcuts: const {
+        SingleActivator(LogicalKeyboardKey.keyZ, control: true): _UndoIntent(),
+        SingleActivator(LogicalKeyboardKey.keyZ, control: true, shift: true):
+            _RedoIntent(),
+        SingleActivator(LogicalKeyboardKey.keyI): _MarkInIntent(),
+        SingleActivator(LogicalKeyboardKey.keyO): _MarkOutIntent(),
+      },
+      child: Actions(
+        actions: {
+          _UndoIntent: CallbackAction<_UndoIntent>(onInvoke: (_) => _project.undo()),
+          _RedoIntent: CallbackAction<_RedoIntent>(onInvoke: (_) => _project.redo()),
+          _MarkInIntent: CallbackAction<_MarkInIntent>(
+              onInvoke: (_) => setState(() => _inPoint = _playhead)),
+          _MarkOutIntent: CallbackAction<_MarkOutIntent>(
+              onInvoke: (_) => setState(() => _outPoint = _playhead)),
+        },
+        child: Focus(
+          autofocus: true,
+          child: Scaffold(
+            body: Column(
+              children: [
+                _toolbar(),
+                if (_error != null) _errorBar(),
+                Expanded(
+                  child: Row(
+                    children: [
+                      _SourceList(project: _project, busy: _busy, onImport: _import,
+                          onPick: (s) {
+                        _project.selectSource(s.id);
+                        setState(() {
+                          _sequenceAt = null;
+                          _playhead = 0;
+                          _inPoint = 0;
+                          _outPoint = s.info.duration;
+                        });
+                        if (s.hasVideo) unawaited(_showSourceFrame(s, 0));
+                      }),
+                      const VerticalDivider(width: 1),
+                      Expanded(child: _previewArea(source)),
+                    ],
+                  ),
+                ),
+                if (source != null) _scrubber(source),
+                ItemInspector(project: _project),
+                Timeline(
+                  project: _project,
+                  playhead: _sequenceAt ?? 0,
+                  onScrub: (at) {
+                    setState(() => _sequenceAt = at);
+                    unawaited(_showSequenceFrame(at));
+                  },
+                ),
+                _statusBar(source),
+              ],
+            ),
           ),
-          if (_error != null)
-            Container(
-              width: double.infinity,
-              color: theme.colorScheme.errorContainer,
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-              child: Text(_error!,
-                  style: TextStyle(color: theme.colorScheme.onErrorContainer)),
-            ),
-          Expanded(
-            child: Container(
-              color: Colors.black,
-              alignment: Alignment.center,
-              child: _preview != null
-                  ? FittedBox(
-                      fit: BoxFit.contain,
-                      child: SizedBox(
-                        width: _preview!.width.toDouble(),
-                        height: _preview!.height.toDouble(),
-                        child: RawImage(image: _preview, filterQuality: FilterQuality.medium),
-                      ),
-                    )
-                  : Text(
-                      info == null ? 'Open a file to start' : 'No pictures in this file',
-                      style: theme.textTheme.titleMedium
-                          ?.copyWith(color: Colors.white38),
-                    ),
-            ),
-          ),
-          if (info != null) _Filmstrip(tiles: _tiles),
-          if (info != null)
-            _Scrubber(
-              info: info,
-              playhead: _playhead,
-              inPoint: _inPoint,
-              outPoint: _outPoint,
-              onScrub: (at) {
-                setState(() => _playhead = at);
-                unawaited(_showFrame(at));
-              },
-              onMarkIn: () => setState(() {
-                _inPoint = _playhead;
-                if (_outPoint <= _inPoint) _outPoint = info.duration;
-              }),
-              onMarkOut: () => setState(() {
-                _outPoint = _playhead;
-                if (_inPoint >= _outPoint) _inPoint = 0;
-              }),
-            ),
-          if (info != null)
-            _StatusBar(info: info, path: _path, hardwareDecoded: _hardwareDecoded),
-        ],
+        ),
       ),
     );
   }
-}
 
-// ─── Pieces ──────────────────────────────────────────────────────────────────
+  Widget _previewArea(Source? source) {
+    return Container(
+      color: Colors.black,
+      alignment: Alignment.center,
+      child: _preview != null
+          ? FittedBox(
+              fit: BoxFit.contain,
+              child: SizedBox(
+                width: _preview!.width.toDouble(),
+                height: _preview!.height.toDouble(),
+                child: RawImage(image: _preview, filterQuality: FilterQuality.medium),
+              ),
+            )
+          : Text(
+              source == null
+                  ? 'Import a file to start'
+                  : 'No pictures in ${source.name}',
+              style: const TextStyle(color: Colors.white38)),
+    );
+  }
 
-class _Toolbar extends StatelessWidget {
-  const _Toolbar({
-    required this.engine,
-    required this.busy,
-    required this.onOpen,
-    this.onExport,
-    this.onCancel,
-    this.progress,
-  });
-
-  final MediaEngine engine;
-  final bool busy;
-  final VoidCallback onOpen;
-  final VoidCallback? onExport;
-  final VoidCallback? onCancel;
-  final double? progress;
-
-  @override
-  Widget build(BuildContext context) {
+  Widget _toolbar() {
     final theme = Theme.of(context);
+    final undo = _project.undoLabel;
+    final redo = _project.redoLabel;
+
     return Material(
       color: const Color(0xFF1B1D22),
       child: Padding(
@@ -304,42 +283,246 @@ class _Toolbar extends StatelessWidget {
             Text('QCKCUT', style: theme.textTheme.titleMedium),
             const SizedBox(width: 16),
             FilledButton.tonalIcon(
-              onPressed: busy ? null : onOpen,
-              icon: const Icon(Icons.folder_open, size: 18),
-              label: const Text('Open'),
+              onPressed: _busy ? null : _import,
+              icon: const Icon(Icons.add, size: 18),
+              label: const Text('Import'),
             ),
             const SizedBox(width: 8),
             FilledButton.icon(
-              onPressed: onExport,
-              icon: const Icon(Icons.file_download, size: 18),
-              label: const Text('Export range'),
+              onPressed: _project.items.isEmpty || _progress != null
+                  ? null
+                  : _exportSequence,
+              icon: const Icon(Icons.movie_creation_outlined, size: 18),
+              label: const Text('Export sequence'),
             ),
-            if (progress != null) ...[
-              const SizedBox(width: 16),
-              SizedBox(
-                width: 160,
-                child: LinearProgressIndicator(value: progress),
-              ),
+            const SizedBox(width: 12),
+            // Says what it would undo rather than offering a bare arrow.
+            IconButton(
+              tooltip: undo == null ? 'Nothing to undo' : 'Undo $undo',
+              onPressed: undo == null ? null : _project.undo,
+              icon: const Icon(Icons.undo, size: 18),
+            ),
+            IconButton(
+              tooltip: redo == null ? 'Nothing to redo' : 'Redo $redo',
+              onPressed: redo == null ? null : _project.redo,
+              icon: const Icon(Icons.redo, size: 18),
+            ),
+
+            if (_progress != null) ...[
+              const SizedBox(width: 12),
+              SizedBox(width: 140, child: LinearProgressIndicator(value: _progress)),
               const SizedBox(width: 8),
-              Text('${(progress! * 100).toStringAsFixed(0)}%'),
-              const SizedBox(width: 8),
-              TextButton(onPressed: onCancel, child: const Text('Cancel')),
+              Text('$_phase ${(_progress! * 100).toStringAsFixed(0)}%',
+                  style: const TextStyle(fontSize: 12)),
+              TextButton(onPressed: widget.engine.cancel, child: const Text('Cancel')),
             ],
+
             const Spacer(),
-            // Said plainly, because whether this is the GPU or the CPU is the
-            // difference between an export taking a minute and an hour.
-            _Chip(
-              label: engine.hasCuda ? 'CUDA ready' : 'CPU only',
-              good: engine.hasCuda,
-            ),
+            _fadeToggle('Fade in', _project.intro, _project.setIntro),
             const SizedBox(width: 8),
-            Tooltip(
-              message: 'Encode: ${engine.encodable.isEmpty ? "software only" : engine.encodable.join(", ")}\n'
-                  'Decode: ${engine.decodable.join(", ")}',
-              child: const Icon(Icons.info_outline, size: 18, color: Colors.white38),
-            ),
+            _fadeToggle('Fade out', _project.outro, _project.setOutro),
+            const SizedBox(width: 12),
+            _Chip(label: widget.engine.hasCuda ? 'CUDA' : 'CPU only',
+                good: widget.engine.hasCuda),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _fadeToggle(
+      String label, seq.Transition? value, void Function(seq.Transition?) set) {
+    final on = value?.type == 'fade';
+    return FilterChip(
+      label: Text(label, style: const TextStyle(fontSize: 12)),
+      selected: on,
+      onSelected: (_) => set(on
+          ? null
+          : const seq.Transition(type: 'fade', duration: transitions.defaultDuration)),
+    );
+  }
+
+  Widget _errorBar() {
+    final theme = Theme.of(context);
+    return Container(
+      width: double.infinity,
+      color: theme.colorScheme.errorContainer,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(_error!,
+                style: TextStyle(color: theme.colorScheme.onErrorContainer)),
+          ),
+          IconButton(
+            icon: const Icon(Icons.close, size: 16),
+            onPressed: () => setState(() => _error = null),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _scrubber(Source source) {
+    final duration = source.info.duration;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+      child: Row(
+        children: [
+          Text(_time(_playhead), style: _mono),
+          Expanded(
+            child: Slider(
+              value: _playhead.clamp(0, duration),
+              max: duration <= 0 ? 1 : duration,
+              onChanged: (at) {
+                setState(() { _playhead = at; _sequenceAt = null; });
+                if (source.hasVideo) unawaited(_showSourceFrame(source, at));
+              },
+            ),
+          ),
+          Text(_time(duration), style: _mono),
+          const SizedBox(width: 12),
+          OutlinedButton(
+            onPressed: () => setState(() => _inPoint = _playhead),
+            child: Text('In ${_time(_inPoint)}'),
+          ),
+          const SizedBox(width: 6),
+          OutlinedButton(
+            onPressed: () => setState(() => _outPoint = _playhead),
+            child: Text('Out ${_time(_outPoint)}'),
+          ),
+          const SizedBox(width: 6),
+          FilledButton.tonal(
+            onPressed: _outPoint > _inPoint
+                ? () => _project.addRange(source, _inPoint, _outPoint)
+                : null,
+            child: Text('Add ${(_outPoint - _inPoint).toStringAsFixed(2)}s'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _statusBar(Source? source) {
+    final bits = <String>[
+      if (source != null) source.name,
+      if (source != null && source.hasVideo)
+        '${source.info.width}x${source.info.height}',
+      if (source?.info.videoCodec != null) source!.info.videoCodec!,
+      if (source != null && source.info.rotation != 0)
+        'rotated ${source.info.rotation}',
+      '${_project.items.length} items',
+      '${_project.duration.toStringAsFixed(2)}s',
+      if (_preview != null) _hardware ? 'NVDEC' : 'software decode',
+    ];
+    return Container(
+      width: double.infinity,
+      color: const Color(0xFF1B1D22),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      child: Text(bits.join('   ·   '),
+          style: const TextStyle(fontSize: 12, color: Colors.white54)),
+    );
+  }
+
+  static const _mono = TextStyle(fontFeatures: [ui.FontFeature.tabularFigures()]);
+
+  static String _time(double seconds) {
+    if (seconds.isNaN || seconds < 0) seconds = 0;
+    final minutes = seconds ~/ 60;
+    final rest = seconds - minutes * 60;
+    return '$minutes:${rest.toStringAsFixed(2).padLeft(5, '0')}';
+  }
+}
+
+class _UndoIntent extends Intent { const _UndoIntent(); }
+class _RedoIntent extends Intent { const _RedoIntent(); }
+class _MarkInIntent extends Intent { const _MarkInIntent(); }
+class _MarkOutIntent extends Intent { const _MarkOutIntent(); }
+
+class _SourceList extends StatelessWidget {
+  const _SourceList({
+    required this.project,
+    required this.busy,
+    required this.onImport,
+    required this.onPick,
+  });
+
+  final Project project;
+  final bool busy;
+  final VoidCallback onImport;
+  final ValueChanged<Source> onPick;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 230,
+      child: Container(
+        color: const Color(0xFF16181D),
+        child: project.sources.isEmpty
+            ? Center(
+                child: TextButton.icon(
+                  onPressed: busy ? null : onImport,
+                  icon: const Icon(Icons.add, size: 16),
+                  label: const Text('Import media'),
+                ),
+              )
+            : ListView.builder(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                itemCount: project.sources.length,
+                itemBuilder: (context, index) {
+                  final source = project.sources[index];
+                  final selected = project.selectedSourceId == source.id;
+                  return InkWell(
+                    onTap: () => onPick(source),
+                    child: Container(
+                      color: selected ? const Color(0x40232830) : null,
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                      child: Row(
+                        children: [
+                          SizedBox(
+                            width: 52,
+                            height: 30,
+                            child: source.tiles.isNotEmpty
+                                ? RawImage(image: source.tiles.first, fit: BoxFit.cover)
+                                : Container(
+                                    color: Colors.black26,
+                                    child: Icon(
+                                      source.hasVideo
+                                          ? Icons.movie_outlined
+                                          : Icons.music_note,
+                                      size: 14,
+                                      color: Colors.white30,
+                                    ),
+                                  ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(source.name,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight:
+                                          selected ? FontWeight.w600 : FontWeight.w400,
+                                    )),
+                                Text('${source.info.duration.toStringAsFixed(1)}s',
+                                    style: const TextStyle(
+                                        fontSize: 10, color: Colors.white38)),
+                              ],
+                            ),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.close, size: 14),
+                            onPressed: () => project.removeSource(source.id),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
       ),
     );
   }
@@ -360,109 +543,6 @@ class _Chip extends StatelessWidget {
         borderRadius: BorderRadius.circular(999),
       ),
       child: Text(label, style: TextStyle(color: colour, fontSize: 12)),
-    );
-  }
-}
-
-class _Filmstrip extends StatelessWidget {
-  const _Filmstrip({required this.tiles});
-  final List<ui.Image> tiles;
-
-  static const double _height = qkThumbHeight * 1.0;
-
-  @override
-  Widget build(BuildContext context) {
-    if (tiles.isEmpty) {
-      return const SizedBox(height: _height);
-    }
-    return SizedBox(
-      height: _height,
-      child: Row(
-        children: [
-          for (final tile in tiles)
-            Expanded(
-              child: RawImage(image: tile, fit: BoxFit.cover),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class _Scrubber extends StatelessWidget {
-  const _Scrubber({
-    required this.info,
-    required this.playhead,
-    required this.inPoint,
-    required this.outPoint,
-    required this.onScrub,
-    required this.onMarkIn,
-    required this.onMarkOut,
-  });
-
-  final SourceInfo info;
-  final double playhead;
-  final double inPoint;
-  final double outPoint;
-  final ValueChanged<double> onScrub;
-  final VoidCallback onMarkIn;
-  final VoidCallback onMarkOut;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-      child: Row(
-        children: [
-          Text(_time(playhead), style: const TextStyle(fontFeatures: [ui.FontFeature.tabularFigures()])),
-          Expanded(
-            child: Slider(
-              value: playhead.clamp(0, info.duration),
-              max: info.duration <= 0 ? 1 : info.duration,
-              onChanged: onScrub,
-            ),
-          ),
-          Text(_time(info.duration),
-              style: const TextStyle(fontFeatures: [ui.FontFeature.tabularFigures()])),
-          const SizedBox(width: 16),
-          OutlinedButton(onPressed: onMarkIn, child: Text('In  ${_time(inPoint)}')),
-          const SizedBox(width: 8),
-          OutlinedButton(onPressed: onMarkOut, child: Text('Out  ${_time(outPoint)}')),
-        ],
-      ),
-    );
-  }
-
-  static String _time(double seconds) {
-    if (seconds.isNaN || seconds < 0) seconds = 0;
-    final minutes = seconds ~/ 60;
-    final rest = seconds - minutes * 60;
-    return '$minutes:${rest.toStringAsFixed(2).padLeft(5, '0')}';
-  }
-}
-
-class _StatusBar extends StatelessWidget {
-  const _StatusBar({required this.info, this.path, required this.hardwareDecoded});
-  final SourceInfo info;
-  final String? path;
-  final bool hardwareDecoded;
-
-  @override
-  Widget build(BuildContext context) {
-    final bits = <String>[
-      if (path != null) path!.split('/').last,
-      if (info.hasVideo) '${info.width}x${info.height}',
-      if (info.videoCodec != null) info.videoCodec!,
-      if (info.rotation != 0) 'rotated ${info.rotation}',
-      if (info.hasAudio) '${info.audioCodec} ${info.sampleRate}Hz ${info.channels}ch',
-      hardwareDecoded ? 'NVDEC' : 'software decode',
-    ];
-    return Container(
-      width: double.infinity,
-      color: const Color(0xFF1B1D22),
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-      child: Text(bits.join('   ·   '),
-          style: const TextStyle(fontSize: 12, color: Colors.white54)),
     );
   }
 }

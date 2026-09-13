@@ -92,6 +92,61 @@ class OutputSettings {
   final int fit;
 }
 
+/// One item of a sequence, as the engine needs it: the source's path rather
+/// than a handle, because the render opens its own decoders and must not
+/// disturb the warm ones the preview is using.
+class SequenceItem {
+  const SequenceItem({
+    required this.path,
+    required this.inPoint,
+    required this.outPoint,
+    this.rotate = 0,
+    this.zoom,
+    this.frameX = 0.5,
+    this.frameY = 0.5,
+    this.gain = 1.0,
+    this.muted = false,
+    this.dipDuration = 0,
+  });
+
+  final String path;
+  final double inPoint;
+  final double outPoint;
+  final int rotate;
+
+  /// Null means the item is left exactly as shot, and the project's own fit is
+  /// used instead of a crop.
+  final double? zoom;
+  final double frameX;
+  final double frameY;
+
+  final double gain;
+  final bool muted;
+
+  /// The dip to black at this item's start. Half is taken from each side, so
+  /// the sequence keeps its length.
+  final double dipDuration;
+
+  Map<String, Object?> toMap() => {
+        'path': path,
+        'inPoint': inPoint,
+        'outPoint': outPoint,
+        'rotate': rotate,
+        'hasFrame': zoom != null ? 1 : 0,
+        'zoom': zoom ?? 1.0,
+        'frameX': frameX,
+        'frameY': frameY,
+        'gain': gain,
+        'muted': muted ? 1 : 0,
+        'dipDuration': dipDuration,
+      };
+}
+
+/// Which half of a render is running. Audio is mixed before any picture is
+/// touched, and on a long sequence that is many seconds with nothing to show
+/// for it, so it is reported rather than left to look like a hang.
+enum RenderPhase { audio, video }
+
 /// Thrown when a render is stopped on purpose, so callers can tell it apart
 /// from a failure.
 class Cancelled implements Exception {
@@ -287,6 +342,30 @@ class MediaEngine {
         'fit': settings.fit,
       }, onProgress: onProgress);
 
+  /// Render a laid-out sequence to one file.
+  Future<void> exportSequence({
+    required List<SequenceItem> items,
+    required String outputPath,
+    OutputSettings settings = const OutputSettings(),
+    double introFade = 0,
+    double outroFade = 0,
+    void Function(double)? onProgress,
+  }) {
+    if (items.isEmpty) throw StateError('the sequence is empty');
+    return _send('exportSequence', {
+      'items': [for (final item in items) item.toMap()],
+      'out': outputPath,
+      'width': settings.width ?? 0,
+      'height': settings.height ?? 0,
+      'fps': settings.fps ?? 0.0,
+      'codec': settings.codec,
+      'bitrate': settings.bitrate ?? 0,
+      'fit': settings.fit,
+      'intro': introFade,
+      'outro': outroFade,
+    }, onProgress: onProgress);
+  }
+
   /// Ask a running export to stop. It ends with a [Cancelled].
   void cancel() => _commands.send(_Request(0, 'cancel', const {}));
 }
@@ -441,6 +520,9 @@ void _workerMain(SendPort ready) {
           // and further decodes are still served while this runs.
           unawaited(_runExport(bindings, engine, ready, request, lastError));
 
+        case 'exportSequence':
+          unawaited(_runSequence(bindings, engine, ready, request, lastError));
+
         default:
           fail('unknown request ${request.op}');
       }
@@ -535,6 +617,103 @@ Future<void> _runExport(QkBindings bindings, Pointer<QkEngine> engine, SendPort 
   } finally {
     ticker.cancel();
     calloc.free(inPath);
+    calloc.free(outPath);
+    calloc.free(settings);
+    calloc.free(slot);
+  }
+}
+
+/// Runs on the export isolate, same arrangement as the single clip: the call
+/// blocks whoever makes it, so it is not the isolate that also has to report.
+int _sequenceOnIsolate(Map<String, Object?> job) {
+  final bindings = QkBindings(DynamicLibrary.open(job['lib']! as String));
+  final callback = Pointer.fromFunction<QkProgressCallback>(_onNativeProgress);
+  return bindings.exportSequence(
+    Pointer<QkEngine>.fromAddress(job['engine']! as int),
+    Pointer<QkSequenceItem>.fromAddress(job['items']! as int),
+    job['count']! as int,
+    Pointer<Utf8>.fromAddress(job['out']! as int),
+    Pointer<QkOutputSettings>.fromAddress(job['settings']! as int),
+    job['intro']! as double,
+    job['outro']! as double,
+    callback,
+    Pointer<Void>.fromAddress(job['slot']! as int),
+  );
+}
+
+Future<void> _runSequence(QkBindings bindings, Pointer<QkEngine> engine, SendPort ready,
+    _Request request, String Function() lastError) async {
+  final maps = (request.args['items']! as List).cast<Map<String, Object?>>();
+  final outPath = (request.args['out']! as String).toNativeUtf8();
+  final settings = calloc<QkOutputSettings>();
+  final slot = calloc<Double>(2);
+  final items = calloc<QkSequenceItem>(maps.length);
+
+  // Every path has to outlive the call, so they are allocated up front and
+  // freed together rather than one per item inside the loop.
+  final paths = <Pointer<Utf8>>[];
+
+  settings.ref
+    ..width = request.args['width']! as int
+    ..height = request.args['height']! as int
+    ..fps = request.args['fps']! as double
+    ..codec = request.args['codec']! as int
+    ..bitrate = request.args['bitrate']! as int
+    ..fit = request.args['fit']! as int;
+
+  for (var i = 0; i < maps.length; i++) {
+    final map = maps[i];
+    final path = (map['path']! as String).toNativeUtf8();
+    paths.add(path);
+    items[i]
+      ..path = path
+      ..inPoint = map['inPoint']! as double
+      ..outPoint = map['outPoint']! as double
+      ..rotate = map['rotate']! as int
+      ..hasFrame = map['hasFrame']! as int
+      ..zoom = map['zoom']! as double
+      ..frameX = map['frameX']! as double
+      ..frameY = map['frameY']! as double
+      ..gain = map['gain']! as double
+      ..muted = map['muted']! as int
+      ..dipDuration = map['dipDuration']! as double;
+  }
+
+  bindings.uncancel(engine);
+
+  final ticker = Timer.periodic(const Duration(milliseconds: 100), (_) {
+    ready.send(_Response(request.id, progress: slot[0]));
+  });
+
+  try {
+    final status = await Isolate.run(() => _sequenceOnIsolate({
+          'lib': _libraryPath(),
+          'engine': engine.address,
+          'items': items.address,
+          'count': maps.length,
+          'out': outPath.address,
+          'settings': settings.address,
+          'intro': request.args['intro']! as double,
+          'outro': request.args['outro']! as double,
+          'slot': slot.address,
+        }));
+
+    ticker.cancel();
+    if (status != QkStatus.ok) {
+      ready.send(_Response(request.id, error: lastError(), status: status));
+      return;
+    }
+    ready.send(_Response(request.id, progress: 1.0));
+    ready.send(_Response(request.id, value: null));
+  } catch (error) {
+    ticker.cancel();
+    ready.send(_Response(request.id, error: '$error', status: QkStatus.errEncode));
+  } finally {
+    ticker.cancel();
+    for (final path in paths) {
+      calloc.free(path);
+    }
+    calloc.free(items);
     calloc.free(outPath);
     calloc.free(settings);
     calloc.free(slot);

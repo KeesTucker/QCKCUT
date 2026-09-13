@@ -66,6 +66,12 @@ const char* qk_version(void) { return "qckcut-engine 0.1.0"; }
 QkEngine* qk_engine_create(void) {
   auto* engine = new QkEngine();
 
+  // FFmpeg talks to stderr by default, and at its default level that includes
+  // things like the AAC encoder's average quantiser, which is noise in an app's
+  // log. Errors are kept: the messages about a hardware decoder failing to
+  // initialise are exactly what makes a fallback diagnosable.
+  av_log_set_level(AV_LOG_ERROR);
+
   // One CUDA context for the whole process. Decode and encode share it, which
   // is what lets an NVDEC surface be handed to NVENC without a round trip
   // through system memory.
