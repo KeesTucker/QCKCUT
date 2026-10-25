@@ -2,6 +2,10 @@ name: CI
 
 # On every PR and push to main. Renovate auto-merges dependency updates only
 # when these pass (KeesTucker/renovate-config).
+#
+# The test suites stay local: the Playwright fixtures encode AAC audio, which
+# the runner's Chrome can't, and the Dart tests drive the native engine. So CI
+# checks what runs anywhere: the web build and the Dart analyzer.
 on:
   pull_request:
   push:
@@ -12,7 +16,7 @@ permissions:
 
 jobs:
   web:
-    name: web (build, Playwright)
+    name: web (build)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -25,12 +29,9 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      # The gate: the Playwright suite, in the runner's own Google Chrome
-      # (playwright.config.mjs uses channel 'chrome', so no browser download).
-      - run: pnpm test
 
   dart:
-    name: dart (analyze, test)
+    name: dart (analyze)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -41,4 +42,3 @@ jobs:
           cache: true
       - run: flutter pub get
       - run: flutter analyze --no-fatal-infos
-      - run: flutter test
