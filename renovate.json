@@ -1,7 +1,4 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "github>KeesTucker/renovate-config"
-  ],
-  "automerge": false
+  "extends": ["github>KeesTucker/renovate-config"]
 }
